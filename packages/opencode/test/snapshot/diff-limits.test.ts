@@ -72,6 +72,30 @@ describe("snapshot diff payload limits", () => {
   )
 
   it.instance(
+    "caps aggregate stored patch bytes across diff summaries",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const snapshot = yield* Snapshot.Service
+        const files = Array.from({ length: 5 }, (_, index) => path.join(tmp.directory, `medium-${index}.txt`))
+        for (const file of files) {
+          yield* Effect.promise(() => Bun.write(file, "before\n"))
+        }
+        const from = yield* snapshot.track()
+        for (const [index, file] of files.entries()) {
+          yield* Effect.promise(() => Bun.write(file, `${"x".repeat(80_000)}-${index}\n`))
+        }
+        const to = yield* snapshot.track()
+
+        const diffs = yield* snapshot.diffFull(from!, to!)
+        expect(diffs).toHaveLength(5)
+        expect(diffs.some((item) => item.patch.includes("diff patches exceed 262144 bytes"))).toBe(true)
+        expect(Buffer.byteLength(diffs.map((item) => item.patch).join(""), "utf8")).toBeLessThan(360_000)
+      }),
+    { git: true },
+  )
+
+  it.instance(
     "keeps small patches intact",
     () =>
       Effect.gen(function* () {

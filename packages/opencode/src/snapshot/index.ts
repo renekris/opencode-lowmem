@@ -23,6 +23,7 @@ export type FileDiff = typeof FileDiff.Type
 const prune = "7.days"
 const limit = 2 * 1024 * 1024
 const maxStoredPatchBytes = 100 * 1024
+const maxStoredDiffPatchBytes = 256 * 1024
 const maxFullPatchChangedLines = 4_000
 const maxFullPatchBlobBytes = 1_000_000
 const generatedPathMarkers = [
@@ -775,6 +776,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 )
                 return Math.max(before, after)
               })
+              let storedDiffPatchBytes = 0
               const patch = (row: Row, before: string, after: string) => {
                 if (row.additions + row.deletions > maxFullPatchChangedLines) {
                   return omitPatch(`changed lines exceed ${maxFullPatchChangedLines}`)
@@ -782,8 +784,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 const text = formatPatch(
                   structuredPatch(row.file, row.file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }),
                 )
-                if (Buffer.byteLength(text, "utf8") <= maxStoredPatchBytes) return text
-                return omitPatch(`patch exceeds ${maxStoredPatchBytes} bytes`)
+                const textBytes = Buffer.byteLength(text, "utf8")
+                if (textBytes > maxStoredPatchBytes) return omitPatch(`patch exceeds ${maxStoredPatchBytes} bytes`)
+                if (storedDiffPatchBytes + textBytes > maxStoredDiffPatchBytes) {
+                  return omitPatch(`diff patches exceed ${maxStoredDiffPatchBytes} bytes`)
+                }
+                storedDiffPatchBytes += textBytes
+                return text
               }
 
               for (let i = 0; i < rows.length; i += step) {
