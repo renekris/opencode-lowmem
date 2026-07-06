@@ -22,8 +22,8 @@ export type FileDiff = typeof FileDiff.Type
 
 const prune = "7.days"
 const limit = 2 * 1024 * 1024
-const maxStoredPatchBytes = 100 * 1024
-const maxStoredDiffPatchBytes = 256 * 1024
+const maxStoredPatchBytes = 10 * 1024 * 1024
+const maxStoredDiffPatchBytes = 10 * 1024 * 1024
 const maxFullPatchChangedLines = 4_000
 const maxFullPatchBlobBytes = 1_000_000
 const generatedPathMarkers = [
