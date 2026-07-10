@@ -31,3 +31,42 @@ test("edge cases", () => {
   expect(BashArity.prefix(["single"])).toEqual(["single"])
   expect(BashArity.prefix(["git"])).toEqual(["git"])
 })
+
+test("git permission patterns ignore arguments after the subcommand", () => {
+  expect(BashArity.permissionPattern(["git", "commit", "-m", "secure cleanup"], "git commit -m 'secure cleanup'")).toBe(
+    "git commit *",
+  )
+  expect(
+    BashArity.permissionPattern(["git", "push", "--dry-run", "origin", "commit"], "git push --dry-run origin commit"),
+  ).toBe("git push *")
+  expect(BashArity.permissionPattern(["git", "clean", "-n", "commit"], "git clean -n commit")).toBe("git clean *")
+  expect(BashArity.permissionPattern(["git", "add", "path/secure-cleanup.kt"], "git add path/secure-cleanup.kt")).toBe(
+    "git add *",
+  )
+  expect(BashArity.permissionPattern(["git", "branch", "--show-current"], "git branch --show-current")).toBe(
+    "git branch --show-current *",
+  )
+  expect(BashArity.permissionPattern(["git", "worktree", "list"], "git worktree list")).toBe("git worktree list *")
+})
+
+test("git permission patterns unwrap environment prefixes and global options", () => {
+  expect(
+    BashArity.permissionPattern(
+      ["GIT_MASTER=1", "git", "commit", "-m", "document git clean behavior"],
+      "GIT_MASTER=1 git commit -m 'document git clean behavior'",
+    ),
+  ).toBe("git commit *")
+  expect(BashArity.permissionPattern(["env", "GIT_MASTER=1", "git", "status"], "env GIT_MASTER=1 git status")).toBe(
+    "git status *",
+  )
+  expect(
+    BashArity.permissionPattern(["git", "-C", "repo", "remote", "add", "origin"], "git -C repo remote add origin"),
+  ).toBe("git remote add *")
+  expect(BashArity.alwaysPattern(["GIT_MASTER=1", "git", "commit", "-m", "message"])).toBe("git commit *")
+  expect(BashArity.alwaysPattern(["git", "-C", "repo", "remote", "add", "origin"])).toBe("git remote add *")
+})
+
+test("non-git permission patterns preserve the full command", () => {
+  const command = "printf 'git clean'"
+  expect(BashArity.permissionPattern(["printf", "git clean"], command)).toBe(command)
+})
