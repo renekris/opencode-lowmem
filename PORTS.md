@@ -8,6 +8,19 @@ UPSTREAM at vX.Y.Z` below rather than deleting the row.
 
 Base: `v1.18.21` (`826d9ad46a`). Fork lineage: `local-diff-caps` → `port/ram-fixes`.
 
+## Installing / building
+
+```bash
+./scripts/fork-build.sh
+```
+
+Derives and stamps the version (`<upstream-base>-lowmem.<round>`, round tracked as git
+tags), builds all platform targets, smoke-tests `--version`, tags the build, and ensures
+the `~/.opencode/bin/opencode` shim execs this checkout's dist binary (writes the shim
+only when missing). Running sessions are never killed — new sessions pick up the new
+build automatically. `OPENCODE_CHANNEL=latest` is baked in and mandatory: any other
+channel makes the binary open `opencode-<channel>.db` instead of the shared `opencode.db`.
+
 ## Ported upstream PRs
 
 | Upstream PR | Author | Title | Our commit | Status |

@@ -45,15 +45,15 @@ before changing fork policy.
 7. Test the affected suites (minimum): `message-v2` pagination, `processor-effect`,
    `config`, plus the customs' suites — `diff-limits`, `summary-memory`, `arity`
    (in `packages/opencode` and `packages/core` as appropriate; `bun test <file>`).
-8. Build: `cd packages/opencode && OPENCODE_VERSION="X.Y.Z-ramfix.N" OPENCODE_CHANNEL=latest bun run build`.
-   `OPENCODE_CHANNEL=latest` is MANDATORY — wrong channel silently opens
-   `opencode-<channel>.db` instead of the real db. Verify smoke output shows the
-   stamped version, then `./packages/opencode/dist/opencode-linux-x64/bin/opencode --version`.
+8. Build: `./scripts/fork-build.sh` (stamps `<base>-lowmem.<round>` from git tags,
+   smoke-tests, tags the build, checks the shim). The channel it bakes in
+   (`OPENCODE_CHANNEL=latest`) is MANDATORY — wrong channel silently opens
+   `opencode-<channel>.db` instead of the real db.
 9. Sandbox proof before declaring done: `XDG_DATA_HOME=<copy-dir> <dist binary> session list`
    must render sessions with exit 0.
 10. Update PORTS.md (statuses, new base tag) and this file only if the procedure changed.
 
-Rollback: `git checkout local-diff-caps && OPENCODE_CHANNEL=latest bun run build`.
+Rollback: `git checkout local-diff-caps && ./scripts/fork-build.sh`.
 
 <!-- FORK END -->
 
