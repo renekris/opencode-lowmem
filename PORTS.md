@@ -40,6 +40,7 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `b89cf97a35` | fix(opencode): cap aggregate stored diff patches | 256KB cumulative per snapshot op |
 | `dd77d3619d` | fix(opencode): avoid storing summary diff patches | summary diffs store metadata; recompute on read |
 | `7d6933befb` | fix(permission): classify git subcommands | env/-C/-c wrapper-aware git subcommand classification |
+| `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; conveyor ordering |
 
 ## Evaluated, deliberately NOT ported
 
@@ -59,9 +60,8 @@ function are out. Backlog (unclaimed, no upstream equivalent):
 
 1. LSP files LRU (~100 files) — `packages/opencode/src/lsp/client.ts` store is set-never-deleted
 2. BackgroundJob settled-entry eviction — `packages/core/src/background-job.ts` Map never deletes
-3. Subagent list keep-last-N — `SubagentData.tabs/details` grow unbounded
-4. Log rotation cap — `data/log/` grows unbounded (781GB-class observed across installs)
-5. `tool-output/` retention window — 5.3GB observed; needs a policy decision (old tool results stop rendering)
-6. `PRAGMA auto_vacuum=INCREMENTAL` — see upstream #31526
+3. Log rotation cap — `data/log/` grows unbounded (781GB-class observed across installs)
+4. `tool-output/` retention window — 5.3GB observed; needs a policy decision (old tool results stop rendering)
+5. `PRAGMA auto_vacuum=INCREMENTAL` — see upstream #31526
 
 See the fork section of `AGENTS.md` for the upkeep procedure and rollback recipe.
