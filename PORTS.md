@@ -41,6 +41,23 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `dd77d3619d` | fix(opencode): avoid storing summary diff patches | summary diffs store metadata; recompute on read |
 | `7d6933befb` | fix(permission): classify git subcommands | env/-C/-c wrapper-aware git subcommand classification |
 | `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; conveyor ordering |
+| (this tree) | fix(opencode): background/revival-safe subagent eviction | Oracle-review fixes: background task parts stay "running" until settled; evicted sessions revive on queued permission/question (256-entry memory); terminal-message backstop; deterministic tie-breaks |
+
+### Subagent-eviction upstream coupling (review guidance)
+
+The fork delta is deliberately concentrated; when rebasing, check these seams first:
+
+- `packages/opencode/src/cli/cmd/run/subagent-data.ts` — nearly all fork logic lives here
+  (compact/settle/revive helpers, `knownSubagentSession`, conveyor ordering). Upstream
+  churn inside `taskTab`, `syncTaskTab`, `reduceSubagentData`, or `bootstrapSubagentData`
+  needs the fork hunks re-checked, not re-derived.
+- `packages/opencode/src/cli/cmd/run/stream.transport.ts` — 8-line delta: import +
+  `tracked()`/`trackBlocker` delegate to `knownSubagentSession`, plus `pinnedSessionID`
+  threading at the two reduce call sites. Anything else changing here is NOT ours.
+- Terminal signals we parse: (1) synthetic parent text part shaped
+  `<task id="ses_*" state="completed|error">` from `TaskTool.injectBackgroundResult`
+  (task.ts), and (2) child `message.updated` with `info.time.completed` (semantic
+  backstop — survives text-template drift upstream).
 
 ## Evaluated, deliberately NOT ported
 
