@@ -41,7 +41,7 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `dd77d3619d` | fix(opencode): avoid storing summary diff patches | summary diffs store metadata; recompute on read |
 | `7d6933befb` | fix(permission): classify git subcommands | env/-C/-c wrapper-aware git subcommand classification |
 | `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; conveyor ordering |
-| (this tree) | fix(opencode): background/revival-safe subagent eviction | Oracle-review fixes: background task parts stay "running" until settled; evicted sessions revive on queued permission/question (256-entry memory); terminal-message backstop; deterministic tie-breaks |
+| (this tree) | fix(opencode): background-safe settlement + eviction revival | Background parts stay "running" until the synthetic injection settles them (synthetic-gated; user text cannot spoof). Evicted sessions revive on queued permission/question (256-entry memory). Reply events re-compact to release guard slots. Deterministic tie-breaks |
 
 ### Subagent-eviction upstream coupling (review guidance)
 
@@ -54,10 +54,11 @@ The fork delta is deliberately concentrated; when rebasing, check these seams fi
 - `packages/opencode/src/cli/cmd/run/stream.transport.ts` — 8-line delta: import +
   `tracked()`/`trackBlocker` delegate to `knownSubagentSession`, plus `pinnedSessionID`
   threading at the two reduce call sites. Anything else changing here is NOT ours.
-- Terminal signals we parse: (1) synthetic parent text part shaped
-  `<task id="ses_*" state="completed|error">` from `TaskTool.injectBackgroundResult`
-  (task.ts), and (2) child `message.updated` with `info.time.completed` (semantic
-  backstop — survives text-template drift upstream).
+- Terminal signal we parse: synthetic (`part.synthetic === true`) parent text part
+  shaped `<task id="ses_*" state="completed|error">` from `TaskTool.injectBackgroundResult`
+  (task.ts). Child terminal messages are deliberately NOT a settle signal:
+  `background.extend` keeps a job running after a child prompt completes
+  (task.test.ts), so a child `message.updated` cannot prove job termination.
 
 ## Evaluated, deliberately NOT ported
 

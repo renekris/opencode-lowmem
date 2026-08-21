@@ -22,7 +22,9 @@ const SUBAGENT_ECHO_LIMIT = 8
 
 // Fork (lowmem): keep-last-N for completed subagent tabs. Never evicts running tabs
 // (blocker-created and background-unsettled ones are running), the pinned (inspected)
-// session, or sessions whose detail still holds queued permissions/questions.
+// session, or sessions whose detail still holds queued permissions/questions. When
+// more than the limit are guarded, the set may temporarily exceed the limit until
+// replies release the guards (reduceSubagentData re-compacts on reply events).
 function recordEvicted(data: SubagentData, tab: FooterSubagentTab) {
   data.evicted.delete(tab.sessionID)
   data.evicted.set(tab.sessionID, tab.label)
@@ -412,8 +414,8 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>,
 const BACKGROUND_SETTLE_PATTERN = /^<task id="([^"]+)" state="(completed|error)">/
 
 // Fork (lowmem): background completions arrive as a synthetic parent text part
-// (TaskTool.injectBackgroundResult) because the task part already returned; it is the
-// only terminal signal, and it also retires revived/blocker tabs stuck in "running".
+// (TaskTool.injectBackgroundResult) because the task part already returned; the
+// synthetic-only gate keeps user or assistant text from spoofing a settlement.
 function settleBackgroundTab(
   data: SubagentData,
   sessionID: string,
@@ -435,8 +437,12 @@ function settleBackgroundTab(
   return true
 }
 
-function settleFromTextPart(data: SubagentData, textValue: string | undefined, pinnedSessionID?: string) {
-  const match = textValue ? BACKGROUND_SETTLE_PATTERN.exec(textValue) : undefined
+function settleFromTextPart(data: SubagentData, part: { synthetic?: boolean; text: string }, pinnedSessionID?: string) {
+  if (part.synthetic !== true) {
+    return false
+  }
+
+  const match = BACKGROUND_SETTLE_PATTERN.exec(part.text)
   if (!match) {
     return false
   }
@@ -842,7 +848,7 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
       }
 
       if (part.type === "text") {
-        changed = settleFromTextPart(input.data, part.text, input.pinnedSessionID) || changed
+        changed = settleFromTextPart(input.data, part, input.pinnedSessionID) || changed
       }
     }
   }
@@ -930,7 +936,7 @@ export function reduceSubagentData(input: {
     const part = event.properties.part
     if (part.sessionID === input.sessionID) {
       if (part.type === "text") {
-        return settleFromTextPart(input.data, part.text, input.pinnedSessionID)
+        return settleFromTextPart(input.data, part, input.pinnedSessionID)
       }
 
       if (part.type !== "tool") {
@@ -974,36 +980,6 @@ export function reduceSubagentData(input: {
     event.type === "message.updated" && isAbortedAssistantMessage(event.properties.info)
       ? cancelSubagentTab(input.data, sessionID, input.pinnedSessionID)
       : false
-  // Fork (lowmem): semantic backstop — the child's terminal assistant message settles a
-  // running background/revived/blocker tab even if the injection text template drifts.
-  if (event.type === "message.updated") {
-    const info = event.properties.info
-    const tab = input.data.tabs.get(sessionID)
-    if (
-      tab &&
-      tab.status === "running" &&
-      info.role === "assistant" &&
-      info.time?.completed !== undefined &&
-      (tab.background === true || tab.partID.startsWith("revived:") || tab.partID.startsWith("bootstrap:"))
-    ) {
-      const settled = settleBackgroundTab(
-        input.data,
-        sessionID,
-        isAbortedAssistantMessage(info) ? "cancelled" : info.error ? "error" : "completed",
-        input.pinnedSessionID,
-      )
-      return (
-        applyChildEvent({
-          detail,
-          event,
-          thinking: input.thinking,
-          limits: input.limits,
-        }) ||
-        settled ||
-        cancelled
-      )
-    }
-  }
   if (event.type === "session.status") {
     if (event.properties.status.type !== "retry") {
       return cancelled
@@ -1036,12 +1012,16 @@ export function reduceSubagentData(input: {
     )
   }
 
-  return (
-    applyChildEvent({
-      detail,
-      event,
-      thinking: input.thinking,
-      limits: input.limits,
-    }) || cancelled
-  )
+  const applied = applyChildEvent({
+    detail,
+    event,
+    thinking: input.thinking,
+    limits: input.limits,
+  })
+  // Fork (lowmem): replies release the queued-work eviction guard; reclaim cap slots.
+  if (event.type === "permission.replied" || event.type === "question.replied" || event.type === "question.rejected") {
+    compactSubagentTabs(input.data, input.pinnedSessionID)
+  }
+
+  return applied || cancelled
 }

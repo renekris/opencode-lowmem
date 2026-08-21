@@ -72,12 +72,13 @@ function backgroundTaskPart(sessionID: string, end: number, status: "completed" 
   }
 }
 
-function settleTextPart(sessionID: string, state: "completed" | "error" = "completed") {
+function settleTextPart(sessionID: string, state: "completed" | "error" = "completed", synthetic = true) {
   return {
     id: `settle-${sessionID}`,
     sessionID: "parent-1",
     messageID: `settle-${sessionID}`,
     type: "text" as const,
+    synthetic,
     text: `<task id="${sessionID}" state="${state}">\n<summary>Background task ${state}: demo</summary>\n<task_result>\n</task_result>\n</task>`,
   }
 }
@@ -96,6 +97,16 @@ function permissionAsked(sessionID: string) {
         messageID: `msg-${sessionID}`,
         callID: `call-${sessionID}`,
       },
+    },
+  }
+}
+
+function permissionReplied(sessionID: string) {
+  return {
+    type: "permission.replied",
+    properties: {
+      sessionID,
+      requestID: `perm-${sessionID}`,
     },
   }
 }
@@ -304,6 +315,17 @@ describe("subagent background settlement", () => {
     expect(data.tabs.size).toBe(0)
   })
 
+  test("non-synthetic parent text cannot spoof a settlement", () => {
+    const data = createSubagentData()
+
+    reduce(data, taskUpdated(backgroundTaskPart("child-bg", 1000)))
+    reduce(data, taskUpdated(settleTextPart("child-bg", "completed", false)))
+    expect(data.tabs.get("child-bg")?.status).toBe("running")
+
+    reduce(data, taskUpdated(settleTextPart("child-bg")))
+    expect(data.tabs.get("child-bg")?.status).toBe("completed")
+  })
+
   test("bootstrap replays settle text parts over background task parts", () => {
     const data = createSubagentData()
 
@@ -321,16 +343,16 @@ describe("subagent background settlement", () => {
     expect(data.tabs.get("child-bg")?.status).toBe("completed")
   })
 
-  test("child terminal assistant message settles an unsettled background tab", () => {
+  test("child terminal message does not settle a background tab (extend keeps the job running)", () => {
     const data = createSubagentData()
 
     reduce(data, taskUpdated(backgroundTaskPart("child-bg", 1000)))
     reduce(data, terminalMessage("child-bg"))
 
-    expect(data.tabs.get("child-bg")?.status).toBe("completed")
+    expect(data.tabs.get("child-bg")?.status).toBe("running")
   })
 
-  test("child terminal assistant message retires a revived tab", () => {
+  test("child terminal message does not retire a revived tab; the injection settles it", () => {
     const data = createSubagentData()
 
     seedCompleted(data, SUBAGENT_COMPLETED_LIMIT + 1)
@@ -338,8 +360,10 @@ describe("subagent background settlement", () => {
     expect(data.tabs.get("child-00")?.status).toBe("running")
 
     reduce(data, terminalMessage("child-00"))
+    expect(data.tabs.get("child-00")?.status).toBe("running")
 
-    expect(data.tabs.get("child-00")?.status).toBe("completed")
+    reduce(data, taskUpdated(settleTextPart("child-00", "error")))
+    expect(data.tabs.get("child-00")?.status).toBe("error")
   })
 
   test("child terminal assistant message does not settle a foreground tab", () => {
@@ -407,5 +431,24 @@ describe("subagent eviction revival", () => {
 
     expect(listSubagentTabs(data).map((tab) => tab.sessionID)).toEqual(["child-a", "child-b", "child-m", "child-z"])
     expect(data.evicted.size).toBe(0)
+  })
+
+  test("guard overflow heals back to the cap once replies release the guards", () => {
+    const data = createSubagentData()
+    const overflowID = `child-${String(SUBAGENT_COMPLETED_LIMIT).padStart(2, "0")}`
+
+    seedCompleted(data, SUBAGENT_COMPLETED_LIMIT)
+    for (let index = 0; index < SUBAGENT_COMPLETED_LIMIT; index++) {
+      reduce(data, permissionAsked(`child-${String(index).padStart(2, "0")}`))
+    }
+    reduce(data, taskUpdated(completedTaskPart(overflowID, 9000)), overflowID)
+    expect(data.tabs.size).toBe(SUBAGENT_COMPLETED_LIMIT + 1)
+
+    reduce(data, permissionReplied("child-00"))
+
+    expect(data.tabs.size).toBe(SUBAGENT_COMPLETED_LIMIT)
+    expect(data.tabs.has("child-00")).toBe(false)
+    expect(data.tabs.has(overflowID)).toBe(true)
+    expect(listSubagentPermissions(data).some((item) => item.id === "perm-child-00")).toBe(false)
   })
 })
