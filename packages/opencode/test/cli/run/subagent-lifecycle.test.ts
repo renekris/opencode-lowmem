@@ -423,14 +423,25 @@ describe("subagent eviction revival", () => {
   })
 
   test("equal timestamps order and evict deterministically by session id", () => {
-    const data = createSubagentData()
-
+    const ordered = createSubagentData()
     for (const sessionID of ["child-z", "child-a", "child-m", "child-b"]) {
-      reduce(data, taskUpdated(completedTaskPart(sessionID, 5000)))
+      reduce(ordered, taskUpdated(completedTaskPart(sessionID, 5000)))
     }
 
-    expect(listSubagentTabs(data).map((tab) => tab.sessionID)).toEqual(["child-a", "child-b", "child-m", "child-z"])
-    expect(data.evicted.size).toBe(0)
+    expect(listSubagentTabs(ordered).map((tab) => tab.sessionID)).toEqual(["child-a", "child-b", "child-m", "child-z"])
+    expect(ordered.evicted.size).toBe(0)
+
+    const data = createSubagentData()
+    for (let index = 0; index <= SUBAGENT_COMPLETED_LIMIT; index++) {
+      reduce(data, taskUpdated(completedTaskPart(`child-${String(index).padStart(2, "0")}`, 5000)))
+    }
+
+    expect(data.tabs.size).toBe(SUBAGENT_COMPLETED_LIMIT)
+    expect(data.evicted.has("child-00")).toBe(true)
+    expect(data.tabs.has("child-00")).toBe(false)
+    const listed = listSubagentTabs(data).map((tab) => tab.sessionID)
+    expect(listed[0]).toBe("child-01")
+    expect(listed[listed.length - 1]).toBe("child-50")
   })
 
   test("guard overflow heals back to the cap once replies release the guards", () => {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { OpencodeClient, type GlobalEvent } from "@opencode-ai/sdk/v2"
 import { createSessionTransport } from "@/cli/cmd/run/stream.transport"
+import { SUBAGENT_COMPLETED_LIMIT } from "@/cli/cmd/run/subagent-data"
 import type { FooterApi, FooterEvent, LocalReplayRow, RunFilePart, StreamCommit } from "@/cli/cmd/run/types"
 
 type EventStream = Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>["stream"]
@@ -1396,6 +1397,96 @@ describe("run stream transport", () => {
     } finally {
       src.close()
       await transport.close()
+    }
+  })
+
+  test("revives an evicted subagent tab for a permission buffered during boot", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const gate = defer<SessionMessage[]>()
+
+    const parts = Array.from({ length: SUBAGENT_COMPLETED_LIMIT + 1 }, (_, index) =>
+      completedTool({
+        sessionID: "session-1",
+        messageID: "msg-tasks",
+        id: `task-${index}`,
+        callID: `call-${index}`,
+        tool: "task",
+        body: {
+          description: "Explore run folder",
+          subagent_type: "explore",
+        },
+        metadata: {
+          sessionId: `child-${String(index).padStart(2, "0")}`,
+        },
+      }),
+    )
+
+    const transport = createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        messages: async ({ sessionID }) => {
+          if (sessionID !== "session-1") {
+            return ok([])
+          }
+
+          return ok(await gate.promise)
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    let started: Awaited<ReturnType<typeof createSessionTransport>> | undefined
+
+    try {
+      src.push({
+        id: "event-perm-evicted",
+        type: "permission.asked",
+        properties: {
+          id: "perm-evicted",
+          sessionID: "child-00",
+          permission: "bash",
+          patterns: ["git status --short"],
+          metadata: {},
+          always: [],
+          tool: {
+            messageID: "msg-child-00",
+            callID: "call-child-00",
+          },
+        },
+      } satisfies SdkEvent)
+
+      gate.resolve([assistantMessage({ sessionID: "session-1", id: "msg-tasks", parts })])
+
+      started = await transport
+
+      const state = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        const current = item?.type === "stream.subagent" ? item.state : undefined
+        return current?.tabs.some((tab) => tab.sessionID === "child-00" && tab.status === "running")
+          ? current
+          : undefined
+      })
+
+      expect(state.tabs.filter((tab) => tab.status === "completed")).toHaveLength(SUBAGENT_COMPLETED_LIMIT)
+      expect(
+        state.permissions.some((request) => request.id === "perm-evicted" && request.sessionID === "child-00"),
+      ).toBe(true)
+
+      await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.view")
+        return item?.type === "stream.view" &&
+          item.view.type === "permission" &&
+          item.view.request.id === "perm-evicted"
+          ? item
+          : undefined
+      })
+    } finally {
+      src.close()
+      await started?.close()
     }
   })
 
