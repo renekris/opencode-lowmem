@@ -11,12 +11,47 @@ import type { FooterSubagentState, FooterSubagentTab, StreamCommit } from "./typ
 
 export const SUBAGENT_BOOTSTRAP_LIMIT = 200
 export const SUBAGENT_CALL_BOOTSTRAP_LIMIT = 80
+export const SUBAGENT_COMPLETED_LIMIT = 50
 
 const SUBAGENT_COMMIT_LIMIT = 80
 const SUBAGENT_CALL_LIMIT = 32
 const SUBAGENT_ROLE_LIMIT = 32
 const SUBAGENT_ERROR_LIMIT = 16
 const SUBAGENT_ECHO_LIMIT = 8
+
+// Fork (lowmem): keep-last-N for completed subagent tabs. Never evicts running tabs
+// (blocker-created ones are running), the pinned (inspected) session, or sessions
+// whose detail still holds queued permissions/questions.
+function compactSubagentTabs(data: SubagentData, pinnedSessionID?: string) {
+  const completed = [...data.tabs.values()]
+    .filter((tab) => tab.status !== "running")
+    .sort((a, b) => a.lastUpdatedAt - b.lastUpdatedAt)
+  const excess = completed.length - SUBAGENT_COMPLETED_LIMIT
+  if (excess <= 0) {
+    return false
+  }
+
+  let evicted = 0
+  for (const tab of completed) {
+    if (evicted >= excess) {
+      break
+    }
+
+    if (tab.sessionID === pinnedSessionID) {
+      continue
+    }
+
+    const detail = data.details.get(tab.sessionID)
+    if (detail && (detail.data.permissions.length > 0 || detail.data.questions.length > 0)) {
+      continue
+    }
+
+    data.tabs.delete(tab.sessionID)
+    data.details.delete(tab.sessionID)
+    evicted++
+  }
+  return evicted > 0
+}
 
 type SessionMessage = {
   parts: Part[]
@@ -48,6 +83,7 @@ export type BootstrapSubagentInput = {
   children: Array<{ id: string; title?: string }>
   permissions: PermissionRequest[]
   questions: QuestionRequest[]
+  pinnedSessionID?: string
 }
 
 function createDetail(sessionID: string): DetailState {
@@ -330,7 +366,7 @@ function taskSessionID(part: ToolPart) {
   return text(metadata(part, "sessionId")) ?? text(metadata(part, "sessionID"))
 }
 
-function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>) {
+function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>, pinnedSessionID?: string) {
   if (part.tool !== "task") {
     return false
   }
@@ -352,6 +388,7 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>)
 
   data.tabs.set(sessionID, next)
   ensureDetail(data, sessionID)
+  compactSubagentTabs(data, pinnedSessionID)
   return true
 }
 
@@ -476,7 +513,7 @@ function isAbortedAssistantMessage(info: Message) {
   return info.role === "assistant" && info.error?.name === "MessageAbortedError"
 }
 
-function cancelSubagentTab(data: SubagentData, sessionID: string) {
+function cancelSubagentTab(data: SubagentData, sessionID: string, pinnedSessionID?: string) {
   const current = data.tabs.get(sessionID)
   if (!current || current.status !== "running") {
     return false
@@ -492,6 +529,7 @@ function cancelSubagentTab(data: SubagentData, sessionID: string) {
   }
 
   data.tabs.set(sessionID, next)
+  compactSubagentTabs(data, pinnedSessionID)
   return true
 }
 
@@ -664,6 +702,8 @@ function snapshotDetail(detail: DetailState) {
   }
 }
 
+// Fork (lowmem): running pinned top; completed in lastUpdatedAt ascending (newest at
+// the bottom where the user is looking). Eviction trims the oldest — see compactSubagentTabs.
 export function listSubagentTabs(data: SubagentData) {
   return [...data.tabs.values()].sort((a, b) => {
     const active = Number(b.status === "running") - Number(a.status === "running")
@@ -671,7 +711,11 @@ export function listSubagentTabs(data: SubagentData) {
       return active
     }
 
-    return b.lastUpdatedAt - a.lastUpdatedAt
+    if (a.status === "running") {
+      return b.lastUpdatedAt - a.lastUpdatedAt
+    }
+
+    return a.lastUpdatedAt - b.lastUpdatedAt
   })
 }
 
@@ -717,7 +761,7 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
         continue
       }
 
-      changed = syncTaskTab(input.data, part, children) || changed
+      changed = syncTaskTab(input.data, part, children, input.pinnedSessionID) || changed
     }
   }
 
@@ -795,6 +839,7 @@ export function reduceSubagentData(input: {
   sessionID: string
   thinking: boolean
   limits: Record<string, number>
+  pinnedSessionID?: string
 }) {
   const event = input.event
 
@@ -805,7 +850,7 @@ export function reduceSubagentData(input: {
         return false
       }
 
-      return syncTaskTab(input.data, part)
+      return syncTaskTab(input.data, part, undefined, input.pinnedSessionID)
     }
   }
 
@@ -831,7 +876,7 @@ export function reduceSubagentData(input: {
   const detail = ensureDetail(input.data, sessionID)
   const cancelled =
     event.type === "message.updated" && isAbortedAssistantMessage(event.properties.info)
-      ? cancelSubagentTab(input.data, sessionID)
+      ? cancelSubagentTab(input.data, sessionID, input.pinnedSessionID)
       : false
   if (event.type === "session.status") {
     if (event.properties.status.type !== "retry") {

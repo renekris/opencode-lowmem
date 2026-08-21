@@ -753,6 +753,7 @@ function createLayer(input: StreamInput) {
             children,
             permissions,
             questions,
+            pinnedSessionID: state.selectedSubagent,
           })
 
           for (const request of [
@@ -938,6 +939,7 @@ function createLayer(input: StreamInput) {
             sessionID: input.sessionID,
             thinking: input.thinking,
             limits: input.limits(),
+            pinnedSessionID: state.selectedSubagent,
           })
           if (changed && prev) {
             traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
