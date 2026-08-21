@@ -1,3 +1,62 @@
+<!-- FORK SECTION — renekris/opencode (port/ram-fixes). Everything between FORK BEGIN/END
+     is fork-local; the rest of this file is upstream's guide. Resolve rebase conflicts
+     in this file by keeping both sections. -->
+<!-- FORK BEGIN -->
+
+# Fork upkeep (renekris/opencode)
+
+This checkout is a **resource-bounded fork** of anomalyco/opencode: full capability,
+bounded footprint. Charter: every patch must bound a resource without removing a
+capability. Read `PORTS.md` (port manifest + credit — keep it updated on every port)
+before changing fork policy.
+
+## Hard rules
+
+- Branches: `local-diff-caps` = pre-port customs baseline; `port/ram-fixes` = active
+  fork line. Never force-push either.
+- Never run `oc upgrade` before checking what it does to this tree — it rebuilds/resets
+  the dist this fork occupies. The live binary is
+  `packages/opencode/dist/opencode-linux-x64/bin/opencode`, path-exec'd by
+  `~/.opencode/bin/opencode`; running sessions keep their old inode.
+- Never kill running opencode sessions to "apply" a build. New sessions pick up new
+  builds automatically.
+- The db (`opencode.db`) is shared by old and new binaries. Only zero-migration changes
+  may ship without a sandbox data-copy proof. Anything schema-touching needs its own
+  gated round (sandbox data-copy proof required).
+
+## Agentic upkeep procedure (per upstream release)
+
+1. `git fetch upstream --tags`; note new tag `vX.Y.Z`.
+2. Evaluate: `git log --oneline HEAD..vX.Y.Z` + diff file list vs fork-touched files
+   (`git diff --name-only vX..vX+1` ∩ fork patches). Zero overlap ⇒ clean rebase expected.
+3. Rebase: `git checkout -b port/ram-fixes-<date> port/ram-fixes && git rebase vX.Y.Z`
+   (or rebase `port/ram-fixes` itself; never rewrite pushed history without Ren).
+4. Check schema safety: if the release adds db migrations (search diff for
+   `data_migration`/drizzle/schema files), STOP and gate like #42771 — sandbox
+   data-copy proof required before shipping.
+5. Sweep upstream for new unmerged memory/perf PRs:
+   `gh api "search/issues?q=repo:anomalyco/opencode+is:pr+is:open+memory+OR+leak+OR+RSS"`.
+   Filter: fixes only, not features; check `merged_at == null`; read thread for
+   maintainer signals. Evaluate each against the charter + not-port list in PORTS.md.
+6. Port candidates: `gh pr diff <N> --repo anomalyco/opencode > /tmp/pr<N>.diff`,
+   then `git apply --check /tmp/pr<N>.diff` (must be CLEAN or trivially 3-way).
+   Commit as `type(scope): summary (port of upstream #N)`; add row to PORTS.md with
+   author credit. Never drop the credit trailer.
+7. Test the affected suites (minimum): `message-v2` pagination, `processor-effect`,
+   `config`, plus the customs' suites — `diff-limits`, `summary-memory`, `arity`
+   (in `packages/opencode` and `packages/core` as appropriate; `bun test <file>`).
+8. Build: `cd packages/opencode && OPENCODE_VERSION="X.Y.Z-ramfix.N" OPENCODE_CHANNEL=latest bun run build`.
+   `OPENCODE_CHANNEL=latest` is MANDATORY — wrong channel silently opens
+   `opencode-<channel>.db` instead of the real db. Verify smoke output shows the
+   stamped version, then `./packages/opencode/dist/opencode-linux-x64/bin/opencode --version`.
+9. Sandbox proof before declaring done: `XDG_DATA_HOME=<copy-dir> <dist binary> session list`
+   must render sessions with exit 0.
+10. Update PORTS.md (statuses, new base tag) and this file only if the procedure changed.
+
+Rollback: `git checkout local-diff-caps && OPENCODE_CHANNEL=latest bun run build`.
+
+<!-- FORK END -->
+
 - To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.
