@@ -25,6 +25,13 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRevert") {}
 
+const maxStoredRevertDiffBytes = 100 * 1024
+
+function omitRevertDiff(diff: string) {
+  if (Buffer.byteLength(diff, "utf8") <= maxStoredRevertDiffBytes) return diff
+  return `[opencode: revert diff omitted (diff exceeds ${maxStoredRevertDiffBytes} bytes)]`
+}
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -70,7 +77,7 @@ const layer = Layer.effect(
       rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
       if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
       yield* snap.revert(patches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+      if (rev.snapshot) rev.diff = omitRevertDiff(yield* snap.diff(rev.snapshot))
       const index = all.findIndex((msg) => msg.info.id === rev.messageID)
       const range = index < 0 ? [] : all.slice(index)
       const diffs = yield* summary.computeDiff({ messages: range })

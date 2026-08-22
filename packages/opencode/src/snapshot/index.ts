@@ -22,6 +22,29 @@ export type FileDiff = typeof FileDiff.Type
 
 const prune = "7.days"
 const limit = 2 * 1024 * 1024
+const maxStoredPatchBytes = 10 * 1024 * 1024
+const maxStoredDiffPatchBytes = 10 * 1024 * 1024
+const maxFullPatchChangedLines = 4_000
+const maxFullPatchBlobBytes = 1_000_000
+const generatedPathMarkers = [
+  "node_modules/",
+  ".vite/",
+  "dist/",
+  "build/",
+  "out/",
+  "coverage/",
+  ".cache/",
+  "__pycache__/",
+  ".pytest_cache/",
+  ".mypy_cache/",
+  ".ruff_cache/",
+  ".next/",
+  ".nuxt/",
+  ".turbo/",
+  "site-packages/",
+  ".venv/",
+  "venv/",
+]
 const core = ["-c", "core.longpaths=true", "-c", "core.symlinks=true"]
 const cfg = ["-c", "core.autocrlf=false", ...core]
 const quote = [...cfg, "-c", "core.quotepath=false"]
@@ -733,19 +756,93 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
               }
 
               const step = 100
-              const patch = (file: string, before: string, after: string) =>
-                formatPatch(structuredPatch(file, file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }))
+              const omitPatch = (reason: string) => `[opencode: patch omitted (${reason})]`
+              const isGeneratedPath = (file: string) => {
+                const normalized = file.replaceAll("\\", "/")
+                return generatedPathMarkers.some((marker) => normalized.includes(marker))
+              }
+              const blobSize = Effect.fnUntraced(function* (ref: string) {
+                const result = yield* git([...cfg, ...args(["cat-file", "-s", ref])])
+                const size = Number(result.text.trim())
+                if (result.code !== 0 || !Number.isFinite(size)) return 0
+                return size
+              })
+              const rowBlobSize = Effect.fnUntraced(function* (row: Row) {
+                if (row.status === "added") return yield* blobSize(`${to}:${row.file}`)
+                if (row.status === "deleted") return yield* blobSize(`${from}:${row.file}`)
+                const [before, after] = yield* Effect.all(
+                  [blobSize(`${from}:${row.file}`), blobSize(`${to}:${row.file}`)],
+                  { concurrency: 2 },
+                )
+                return Math.max(before, after)
+              })
+              let storedDiffPatchBytes = 0
+              const patch = (row: Row, before: string, after: string) => {
+                if (row.additions + row.deletions > maxFullPatchChangedLines) {
+                  return omitPatch(`changed lines exceed ${maxFullPatchChangedLines}`)
+                }
+                const text = formatPatch(
+                  structuredPatch(row.file, row.file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }),
+                )
+                const textBytes = Buffer.byteLength(text, "utf8")
+                if (textBytes > maxStoredPatchBytes) return omitPatch(`patch exceeds ${maxStoredPatchBytes} bytes`)
+                if (storedDiffPatchBytes + textBytes > maxStoredDiffPatchBytes) {
+                  return omitPatch(`diff patches exceed ${maxStoredDiffPatchBytes} bytes`)
+                }
+                storedDiffPatchBytes += textBytes
+                return text
+              }
 
               for (let i = 0; i < rows.length; i += step) {
                 const run = rows.slice(i, i + step)
-                const text = yield* load(run)
+                const patchRows: Row[] = []
+                const omitReasons = new Map<string, string>()
+                for (const row of run) {
+                  if (row.binary) continue
+                  if (isGeneratedPath(row.file)) {
+                    omitReasons.set(row.file, "generated path")
+                    continue
+                  }
+                  if (row.additions + row.deletions > maxFullPatchChangedLines) {
+                    omitReasons.set(row.file, `changed lines exceed ${maxFullPatchChangedLines}`)
+                    continue
+                  }
+                  const size = yield* rowBlobSize(row)
+                  if (size > maxFullPatchBlobBytes) {
+                    omitReasons.set(row.file, `blob exceeds ${maxFullPatchBlobBytes} bytes`)
+                    continue
+                  }
+                  patchRows.push(row)
+                }
+                const text = yield* load(patchRows)
 
                 for (const row of run) {
+                  if (row.binary) {
+                    result.push({
+                      file: row.file,
+                      patch: "",
+                      additions: row.additions,
+                      deletions: row.deletions,
+                      status: row.status,
+                    })
+                    continue
+                  }
+                  const reason = omitReasons.get(row.file)
+                  if (reason) {
+                    result.push({
+                      file: row.file,
+                      patch: omitPatch(reason),
+                      additions: row.additions,
+                      deletions: row.deletions,
+                      status: row.status,
+                    })
+                    continue
+                  }
                   const hit = text?.get(row.file) ?? { before: "", after: "" }
-                  const [before, after] = row.binary ? ["", ""] : text ? [hit.before, hit.after] : yield* show(row)
+                  const [before, after] = text ? [hit.before, hit.after] : yield* show(row)
                   result.push({
                     file: row.file,
-                    patch: row.binary ? "" : patch(row.file, before, after),
+                    patch: patch(row, before, after),
                     additions: row.additions,
                     deletions: row.deletions,
                     status: row.status,

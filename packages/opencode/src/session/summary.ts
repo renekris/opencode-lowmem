@@ -122,17 +122,24 @@ const layer = Layer.effect(
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
       const msgDiffs = yield* computeDiff({ messages })
+      // Fork(lowmem): patches are persisted because snapshot objects are pruned
+      // after 7 days; diffFull output is already byte-capped, so this stays bounded.
       target.info.summary = { ...target.info.summary, diffs: msgDiffs }
       yield* sessions.updateMessage(target.info)
     })
 
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
       if (!input.messageID) return []
-      const message = (yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-        (item) => item.info.id === input.messageID,
-      )
+      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+      const message = all.find((item) => item.info.id === input.messageID)
       if (!message || message.info.role !== "user") return []
-      const diffs = message.info.summary?.diffs ?? []
+      const messages = all.filter(
+        (item) =>
+          item.info.id === input.messageID ||
+          (item.info.role === "assistant" && item.info.parentID === input.messageID),
+      )
+      const computed = yield* computeDiff({ messages })
+      const diffs = computed.length > 0 ? computed : (message.info.summary?.diffs ?? [])
       return diffs.map((item) => {
         if (item.file === undefined) return item
         const file = unquoteGitPath(item.file)
