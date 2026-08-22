@@ -11,12 +11,62 @@ import type { FooterSubagentState, FooterSubagentTab, StreamCommit } from "./typ
 
 export const SUBAGENT_BOOTSTRAP_LIMIT = 200
 export const SUBAGENT_CALL_BOOTSTRAP_LIMIT = 80
+export const SUBAGENT_COMPLETED_LIMIT = 50
+export const SUBAGENT_EVICTED_MEMORY_LIMIT = 256
 
 const SUBAGENT_COMMIT_LIMIT = 80
 const SUBAGENT_CALL_LIMIT = 32
 const SUBAGENT_ROLE_LIMIT = 32
 const SUBAGENT_ERROR_LIMIT = 16
 const SUBAGENT_ECHO_LIMIT = 8
+
+// Fork (lowmem): keep-last-N for completed subagent tabs. Never evicts running tabs
+// (blocker-created and background-unsettled ones are running), the pinned (inspected)
+// session, or sessions whose detail still holds queued permissions/questions. When
+// more than the limit are guarded, the set may temporarily exceed the limit until
+// replies release the guards (reduceSubagentData re-compacts on reply events).
+function recordEvicted(data: SubagentData, tab: FooterSubagentTab) {
+  data.evicted.delete(tab.sessionID)
+  data.evicted.set(tab.sessionID, tab.label)
+  if (data.evicted.size > SUBAGENT_EVICTED_MEMORY_LIMIT) {
+    const oldest = data.evicted.keys().next().value
+    if (oldest !== undefined) {
+      data.evicted.delete(oldest)
+    }
+  }
+}
+
+function compactSubagentTabs(data: SubagentData, pinnedSessionID?: string) {
+  const completed = [...data.tabs.values()]
+    .filter((tab) => tab.status !== "running")
+    .sort((a, b) => a.lastUpdatedAt - b.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID))
+  const excess = completed.length - SUBAGENT_COMPLETED_LIMIT
+  if (excess <= 0) {
+    return false
+  }
+
+  let evicted = 0
+  for (const tab of completed) {
+    if (evicted >= excess) {
+      break
+    }
+
+    if (tab.sessionID === pinnedSessionID) {
+      continue
+    }
+
+    const detail = data.details.get(tab.sessionID)
+    if (detail && (detail.data.permissions.length > 0 || detail.data.questions.length > 0)) {
+      continue
+    }
+
+    data.tabs.delete(tab.sessionID)
+    data.details.delete(tab.sessionID)
+    recordEvicted(data, tab)
+    evicted++
+  }
+  return evicted > 0
+}
 
 type SessionMessage = {
   parts: Part[]
@@ -40,6 +90,7 @@ type DetailState = {
 export type SubagentData = {
   tabs: Map<string, FooterSubagentTab>
   details: Map<string, DetailState>
+  evicted: Map<string, string>
 }
 
 export type BootstrapSubagentInput = {
@@ -48,6 +99,7 @@ export type BootstrapSubagentInput = {
   children: Array<{ id: string; title?: string }>
   permissions: PermissionRequest[]
   questions: QuestionRequest[]
+  pinnedSessionID?: string
 }
 
 function createDetail(sessionID: string): DetailState {
@@ -294,7 +346,9 @@ function metadata(part: ToolPart, key: string) {
 
 function taskStatus(part: ToolPart): FooterSubagentTab["status"] {
   if (part.state.status === "completed") {
-    return "completed"
+    // Fork (lowmem): a completed background task part means the tool returned while the child
+    // session still runs; settleBackgroundTab flips the tab once the synthetic injection lands.
+    return metadata(part, "background") === true ? "running" : "completed"
   }
 
   if (part.state.status === "error") {
@@ -330,7 +384,7 @@ function taskSessionID(part: ToolPart) {
   return text(metadata(part, "sessionId")) ?? text(metadata(part, "sessionID"))
 }
 
-function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>) {
+function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>, pinnedSessionID?: string) {
   if (part.tool !== "task") {
     return false
   }
@@ -351,8 +405,49 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>)
   }
 
   data.tabs.set(sessionID, next)
+  data.evicted.delete(sessionID)
   ensureDetail(data, sessionID)
+  compactSubagentTabs(data, pinnedSessionID)
   return true
+}
+
+const BACKGROUND_SETTLE_PATTERN = /^<task id="([^"]+)" state="(completed|error)">/
+
+// Fork (lowmem): background completions arrive as a synthetic parent text part
+// (TaskTool.injectBackgroundResult) because the task part already returned; the
+// synthetic-only gate keeps user or assistant text from spoofing a settlement.
+function settleBackgroundTab(
+  data: SubagentData,
+  sessionID: string,
+  status: FooterSubagentTab["status"],
+  pinnedSessionID?: string,
+) {
+  const current = data.tabs.get(sessionID)
+  if (!current || current.status !== "running") {
+    return false
+  }
+
+  const next = { ...current, status, lastUpdatedAt: Date.now() }
+  if (sameSubagentTab(current, next)) {
+    return false
+  }
+
+  data.tabs.set(sessionID, next)
+  compactSubagentTabs(data, pinnedSessionID)
+  return true
+}
+
+function settleFromTextPart(data: SubagentData, part: { synthetic?: boolean; text: string }, pinnedSessionID?: string) {
+  if (part.synthetic !== true) {
+    return false
+  }
+
+  const match = BACKGROUND_SETTLE_PATTERN.exec(part.text)
+  if (!match) {
+    return false
+  }
+
+  return settleBackgroundTab(data, match[1], match[2] as "completed" | "error", pinnedSessionID)
 }
 
 function frameKey(commit: StreamCommit) {
@@ -468,6 +563,25 @@ function ensureBlockerTab(
     status: "running",
     lastUpdatedAt: Date.now(),
   })
+  data.evicted.delete(sessionID)
+  ensureDetail(data, sessionID)
+  return true
+}
+
+// Fork (lowmem): a queued permission/question from a session this view evicted must
+// resurrect a tab; otherwise the request stays invisible and the child blocks forever.
+function reviveSubagentTab(data: SubagentData, sessionID: string, kind: "permission" | "question") {
+  const label = data.evicted.get(sessionID)
+  data.evicted.delete(sessionID)
+  data.tabs.set(sessionID, {
+    sessionID,
+    partID: `revived:${sessionID}`,
+    callID: `revived:${sessionID}`,
+    label: label ?? Locale.titlecase(kind),
+    description: kind === "permission" ? "Pending permission" : "Pending question",
+    status: "running",
+    lastUpdatedAt: Date.now(),
+  })
   ensureDetail(data, sessionID)
   return true
 }
@@ -476,7 +590,7 @@ function isAbortedAssistantMessage(info: Message) {
   return info.role === "assistant" && info.error?.name === "MessageAbortedError"
 }
 
-function cancelSubagentTab(data: SubagentData, sessionID: string) {
+function cancelSubagentTab(data: SubagentData, sessionID: string, pinnedSessionID?: string) {
   const current = data.tabs.get(sessionID)
   if (!current || current.status !== "running") {
     return false
@@ -492,6 +606,7 @@ function cancelSubagentTab(data: SubagentData, sessionID: string) {
   }
 
   data.tabs.set(sessionID, next)
+  compactSubagentTabs(data, pinnedSessionID)
   return true
 }
 
@@ -642,6 +757,20 @@ function knownSession(data: SubagentData, sessionID: string) {
   return data.tabs.has(sessionID)
 }
 
+// Fork (lowmem): single helper for transport-level gates. Includes evicted sessions so
+// a queued permission/question from an evicted child still reaches the reducer, which
+// revives its tab instead of dropping the request. A hit refreshes the LRU position so
+// repeatedly active evicted sessions are not the first trimmed at the memory limit.
+export function knownSubagentSession(data: SubagentData, sessionID: string | undefined) {
+  if (!sessionID) return false
+  if (data.tabs.has(sessionID)) return true
+  if (!data.evicted.has(sessionID)) return false
+  const label = data.evicted.get(sessionID)
+  data.evicted.delete(sessionID)
+  data.evicted.set(sessionID, label ?? "")
+  return true
+}
+
 export function listSubagentPermissions(data: SubagentData) {
   return [...data.details.values()].flatMap((detail) => detail.data.permissions)
 }
@@ -654,6 +783,7 @@ export function createSubagentData(): SubagentData {
   return {
     tabs: new Map(),
     details: new Map(),
+    evicted: new Map(),
   }
 }
 
@@ -664,6 +794,8 @@ function snapshotDetail(detail: DetailState) {
   }
 }
 
+// Fork (lowmem): running pinned top; completed in lastUpdatedAt ascending (newest at
+// the bottom where the user is looking). Eviction trims the oldest — see compactSubagentTabs.
 export function listSubagentTabs(data: SubagentData) {
   return [...data.tabs.values()].sort((a, b) => {
     const active = Number(b.status === "running") - Number(a.status === "running")
@@ -671,7 +803,11 @@ export function listSubagentTabs(data: SubagentData) {
       return active
     }
 
-    return b.lastUpdatedAt - a.lastUpdatedAt
+    if (a.status === "running") {
+      return b.lastUpdatedAt - a.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID)
+    }
+
+    return a.lastUpdatedAt - b.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID)
   })
 }
 
@@ -713,11 +849,14 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
 
   for (const message of input.messages) {
     for (const part of message.parts) {
-      if (part.type !== "tool") {
+      if (part.type === "tool") {
+        changed = syncTaskTab(input.data, part, children, input.pinnedSessionID) || changed
         continue
       }
 
-      changed = syncTaskTab(input.data, part, children) || changed
+      if (part.type === "text") {
+        changed = settleFromTextPart(input.data, part, input.pinnedSessionID) || changed
+      }
     }
   }
 
@@ -756,6 +895,7 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
     changed = queueChanged(detail.data, before) || changed
   }
 
+  compactSubagentTabs(input.data, input.pinnedSessionID)
   return changed
 }
 
@@ -795,17 +935,22 @@ export function reduceSubagentData(input: {
   sessionID: string
   thinking: boolean
   limits: Record<string, number>
+  pinnedSessionID?: string
 }) {
   const event = input.event
 
   if (event.type === "message.part.updated") {
     const part = event.properties.part
     if (part.sessionID === input.sessionID) {
+      if (part.type === "text") {
+        return settleFromTextPart(input.data, part, input.pinnedSessionID)
+      }
+
       if (part.type !== "tool") {
         return false
       }
 
-      return syncTaskTab(input.data, part)
+      return syncTaskTab(input.data, part, undefined, input.pinnedSessionID)
     }
   }
 
@@ -824,6 +969,15 @@ export function reduceSubagentData(input: {
         ? event.properties.part.sessionID
         : undefined
 
+  if (
+    (event.type === "permission.asked" || event.type === "question.asked") &&
+    sessionID &&
+    !input.data.tabs.has(sessionID) &&
+    input.data.evicted.has(sessionID)
+  ) {
+    reviveSubagentTab(input.data, sessionID, event.type === "permission.asked" ? "permission" : "question")
+  }
+
   if (!sessionID || !knownSession(input.data, sessionID)) {
     return false
   }
@@ -831,7 +985,7 @@ export function reduceSubagentData(input: {
   const detail = ensureDetail(input.data, sessionID)
   const cancelled =
     event.type === "message.updated" && isAbortedAssistantMessage(event.properties.info)
-      ? cancelSubagentTab(input.data, sessionID)
+      ? cancelSubagentTab(input.data, sessionID, input.pinnedSessionID)
       : false
   if (event.type === "session.status") {
     if (event.properties.status.type !== "retry") {
@@ -865,12 +1019,16 @@ export function reduceSubagentData(input: {
     )
   }
 
-  return (
-    applyChildEvent({
-      detail,
-      event,
-      thinking: input.thinking,
-      limits: input.limits,
-    }) || cancelled
-  )
+  const applied = applyChildEvent({
+    detail,
+    event,
+    thinking: input.thinking,
+    limits: input.limits,
+  })
+  // Fork (lowmem): replies release the queued-work eviction guard; reclaim cap slots.
+  if (event.type === "permission.replied" || event.type === "question.replied" || event.type === "question.rejected") {
+    compactSubagentTabs(input.data, input.pinnedSessionID)
+  }
+
+  return applied || cancelled
 }

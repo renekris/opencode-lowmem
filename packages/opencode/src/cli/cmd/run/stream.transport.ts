@@ -35,6 +35,7 @@ import {
   listSubagentPermissions,
   listSubagentQuestions,
   listSubagentTabs,
+  knownSubagentSession,
   reduceSubagentData,
   sameSubagentTab,
   snapshotSelectedSubagentData,
@@ -459,7 +460,7 @@ function createLayer(input: StreamInput) {
         const replayedParts = new Set<string>()
         const recovering = new Set<string>()
         const tracked = (sessionID: string | undefined) =>
-          sessionID === input.sessionID || (!!sessionID && state.subagent.tabs.has(sessionID))
+          sessionID === input.sessionID || knownSubagentSession(state.subagent, sessionID)
         const currentSubagentState = () => {
           if (state.selectedSubagent && !state.subagent.tabs.has(state.selectedSubagent)) {
             state.selectedSubagent = undefined
@@ -482,7 +483,10 @@ function createLayer(input: StreamInput) {
             return
           }
 
-          if (event.properties.sessionID !== input.sessionID && !state.subagent.tabs.has(event.properties.sessionID)) {
+          if (
+            event.properties.sessionID !== input.sessionID &&
+            !knownSubagentSession(state.subagent, event.properties.sessionID)
+          ) {
             return
           }
 
@@ -753,6 +757,7 @@ function createLayer(input: StreamInput) {
             children,
             permissions,
             questions,
+            pinnedSessionID: state.selectedSubagent,
           })
 
           for (const request of [
@@ -938,6 +943,7 @@ function createLayer(input: StreamInput) {
             sessionID: input.sessionID,
             thinking: input.thinking,
             limits: input.limits(),
+            pinnedSessionID: state.selectedSubagent,
           })
           if (changed && prev) {
             traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
