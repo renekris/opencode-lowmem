@@ -1,9 +1,13 @@
-<!-- FORK SECTION — renekris/opencode (port/ram-fixes). Everything between FORK BEGIN/END
+<!-- FORK SECTION — renekris/opencode-lowmem (branch lowmem, from port/ram-fixes). Everything between FORK BEGIN/END
      is fork-local; the rest of this file is upstream's guide. Resolve rebase conflicts
      in this file by keeping both sections. -->
 <!-- FORK BEGIN -->
 
-# Fork upkeep (renekris/opencode)
+# Fork upkeep (renekris/opencode-lowmem)
+
+Published at `renekris/opencode-lowmem` (default branch `lowmem`, releases cut per
+`v*-lowmem.*` tag). The branch and tags are public history: never force-push them,
+never rewrite or delete published tags; new work = new commits + a new lowmem round.
 
 This checkout is a **resource-bounded fork** of anomalyco/opencode: full capability,
 bounded footprint. Charter: every patch must bound a resource without removing a

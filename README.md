@@ -8,6 +8,12 @@
   </a>
 </p>
 <p align="center">The open source AI coding agent.</p>
+
+> [!NOTE]
+> This is **opencode-lowmem**, a resource-bounded build of opencode: the same agent,
+> with memory/reliability fixes collected from unmerged upstream PRs plus original
+> bounds-oriented work. See [FORK.md](FORK.md) and [PORTS.md](PORTS.md).
+
 <p align="center">
   <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
