@@ -17,10 +17,19 @@ test("orders children by creation time ascending", () => {
   expect(ordered.map((x) => x.id)).toEqual(["a", "b", "c"])
 })
 
-test("breaks creation-time ties deterministically by id", () => {
-  expect(compareChildSessions(child("a", 5), child("b", 5))).toBe(-1)
-  expect(compareChildSessions(child("b", 5), child("a", 5))).toBe(1)
+test("breaks creation-time ties by descending id (later creation = smaller id)", () => {
+  expect(compareChildSessions(child("a", 5), child("b", 5))).toBe(1)
+  expect(compareChildSessions(child("b", 5), child("a", 5))).toBe(-1)
   expect(compareChildSessions(child("a", 5), child("a", 5))).toBe(0)
+})
+
+test("same-millisecond descending session ids keep causal order", () => {
+  // SessionID.descending(): created later in the same ms -> lexically smaller id.
+  const first = child("ses_9f2", 500)
+  const second = child("ses_9f1", 500)
+  const third = child("ses_9f0", 500)
+  expect(newestChildSessionID([third, first, second])).toBe("ses_9f0")
+  expect(cycleChildSessionID([third, first, second], "ses_9f2", 1)).toBe("ses_9f1")
 })
 
 test("newest child is the conveyor tail and ignores non-child rows", () => {
@@ -49,11 +58,12 @@ test("unknown current resolves to the oldest for +1 and newest for -1", () => {
   expect(cycleChildSessionID(sessions(), undefined, -1)).toBe("c")
 })
 
-test("cycling over tie timestamps stays deterministic by id", () => {
+test("cycling over tie timestamps stays deterministic by descending id", () => {
   const tied = [child("z", 7), child("y", 7), child("x", 7)]
-  expect(cycleChildSessionID(tied, "x", 1)).toBe("y")
-  expect(cycleChildSessionID(tied, "z", -1)).toBe("y")
-  expect(cycleChildSessionID(tied, "y", -1)).toBe("x")
+  expect(cycleChildSessionID(tied, "z", 1)).toBe("y")
+  expect(cycleChildSessionID(tied, "x", -1)).toBe("y")
+  expect(cycleChildSessionID(tied, "y", -1)).toBe("z")
+  expect(newestChildSessionID(tied)).toBe("x")
 })
 
 test("cycling with no children is a no-op", () => {

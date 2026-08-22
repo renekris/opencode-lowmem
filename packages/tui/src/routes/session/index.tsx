@@ -207,7 +207,11 @@ export function Session() {
   onCleanup(() => setEpilogue())
   const children = createMemo(() => {
     const parentID = session()?.parentID ?? session()?.id
-    return sync.data.session.filter((x) => x.parentID === parentID || x.id === parentID).toSorted(compareChildSessions)
+    // Fork(lowmem): upstream lexical order kept for permissions()/questions()
+    // aggregation; navigation sorts its own copies via ./child-sessions.
+    return sync.data.session
+      .filter((x) => x.parentID === parentID || x.id === parentID)
+      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const messagesBeforeRevert = () => {
