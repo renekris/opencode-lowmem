@@ -23,6 +23,7 @@ import { useSync } from "../../context/sync"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+import { compareChildSessions, cycleChildSessionID, newestChildSessionID } from "./child-sessions"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
@@ -206,9 +207,7 @@ export function Session() {
   onCleanup(() => setEpilogue())
   const children = createMemo(() => {
     const parentID = session()?.parentID ?? session()?.id
-    return sync.data.session
-      .filter((x) => x.parentID === parentID || x.id === parentID)
-      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    return sync.data.session.filter((x) => x.parentID === parentID || x.id === parentID).toSorted(compareChildSessions)
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const messagesBeforeRevert = () => {
@@ -441,19 +440,17 @@ export function Session() {
 
   function moveFirstChild() {
     if (children().length === 1) return
-    const next = children().find((x) => !!x.parentID)
-    if (next) enterChild(next.id)
+    // Fork(lowmem): super+down enters the newest child (conveyor tail).
+    const next = newestChildSessionID(children())
+    if (next) enterChild(next)
   }
 
   function moveChild(direction: number) {
     if (children().length === 1) return
-
-    const sessions = children().filter((x) => !!x.parentID)
-    let next = sessions.findIndex((x) => x.id === session()?.id) - direction
-
-    if (next >= sessions.length) next = 0
-    if (next < 0) next = sessions.length - 1
-    if (sessions[next]) enterChild(sessions[next].id)
+    // Fork(lowmem): +1 steps toward the newest child, -1 toward the oldest,
+    // wrapping circularly in conveyor order.
+    const next = cycleChildSessionID(children(), session()?.id, direction === 1 ? 1 : -1)
+    if (next) enterChild(next)
   }
 
   function childSessionHandler(func: () => void) {
