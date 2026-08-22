@@ -1,135 +1,91 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
+# opencode-lowmem
 
-> [!NOTE]
-> This is **opencode-lowmem**, a resource-bounded build of opencode: the same agent,
-> with memory/reliability fixes collected from unmerged upstream PRs plus original
-> bounds-oriented work. See [FORK.md](FORK.md) and [PORTS.md](PORTS.md).
+> A resource-bounded build of [opencode](https://github.com/anomalyco/opencode):
+> **the same agent, bounded memory.** Long-lived sessions, subagent-heavy
+> workloads, and flaky gateways don't grow to 10+ GB or hang silently anymore.
 
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+Full capability, nothing removed or gated: every change either **bounds a
+resource** or **fixes a reliability defect**. The database format is untouched —
+sessions, auth, and config work interchangeably with stock opencode.
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+## What's in the fork
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+### Ported upstream fixes (never merged upstream)
 
----
+| Fix | Plain language | Detail |
+|---|---|---|
+| Bounded compacted-history hydration | After context compaction, only the recent window loads; old history stays on disk until needed | [#39930](https://github.com/anomalyco/opencode/pull/39930) — a 609-message session materialized 11 MB; now ~0.8 MB |
+| O(N) delta accumulation | Very long replies no longer get slower the longer they run | [#42150](https://github.com/anomalyco/opencode/pull/42150) — text/reasoning deltas were O(N²) string concatenation |
+| PubSub listener leak fix | Subscriptions to finished streams are released | [#38939](https://github.com/anomalyco/opencode/pull/38939) — `allBounded` kept listeners alive forever |
+| Config cache isolation | Two projects open at once can't corrupt each other's settings | [#41950](https://github.com/anomalyco/opencode/pull/41950) — global config cache mutated across workspaces |
+| Empty-stream retry | A gateway that closes cleanly with no content retries instead of silently ending your turn | [#43881](https://github.com/anomalyco/opencode/pull/43881) — `finishReason: unknown` + 0 output tokens raises a retryable error (adds a regression test) |
+| Stream failures marked errored | Failed streams are recorded as errored, not as normal stops | [#42176](https://github.com/anomalyco/opencode/pull/42176) — error path sets `finish: "error"` |
+| Honest SSE chunk timeout | Server keepalive comments can't fake "data is flowing" during a stall | [#43607](https://github.com/anomalyco/opencode/pull/43607) — one deadline per stream, reset only on complete `data:` events |
 
-### Installation
+### Original fork work (customs)
+
+| Feature | Plain language | Detail |
+|---|---|---|
+| Diff-patch caps | Snapshots of large edits can't balloon memory and disk | per-patch 100 KB, 256 KB aggregate; summaries store metadata and recompute on read |
+| Subagent tab eviction | The subagent list keeps the newest 50 finished agents, not every one ever spawned | running, pinned, and permission-holding sessions are exempt; evicted agents revive if they ask again; 256-entry revival memory |
+| Conveyor ordering | Finished subagents stack oldest-first — the bottom of the list is always the latest | deterministic even for same-millisecond session IDs |
+| Conveyor navigation | Tab/arrows move through child sessions in creation order; footer and session list finally agree | shared comparator with a causal same-millisecond tie-break |
+| Git subcommand classifier | "Always allow" for `git -C ../worktree commit` stores `git commit *` — never junk, never a wider grant than you approved | env/command unwrapping + git global-option skipping + scoped patterns |
+
+Provenance, per-round history, the durability/rebase policy, and the
+deliberately-not-ported list: [PORTS.md](PORTS.md).
+
+## Install
+
+### One-liner (prebuilt binaries from GitHub Releases)
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
-
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+curl -fsSL https://raw.githubusercontent.com/renekris/opencode-lowmem/lowmem/scripts/fork-install.sh | bash
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+Detects your platform, downloads the matching release binary, installs to
+`~/.opencode/bin/opencode`. Running sessions are never killed; new sessions pick
+up the new build.
 
-### Desktop App (BETA)
+### Build from source
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+Requires [bun](https://bun.sh):
 
 ```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+git clone https://github.com/renekris/opencode-lowmem
+cd opencode-lowmem
+./scripts/fork-build.sh
 ```
 
-#### Installation Directory
+Builds all platform targets, stamps the version (`<upstream>-lowmem.<round>`
+from git tags), smoke-tests, and tags the build.
 
-The install script respects the following priority order for the installation path:
+### External tool installers
 
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
+- **npm**: not yet published. Upstream ships via npm with per-platform
+  optionalDependencies; the same packaging works under a fork package name
+  (`npm i -g opencode-lowmem`) once an npm publishing setup exists.
+- **Homebrew**: not yet available. A `renekris/lowmem` tap with formulas
+  pointing at the release binaries is the natural next step.
+- **Direct download**: per-platform archives are attached to every
+  [release](https://github.com/renekris/opencode-lowmem/releases).
 
-```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
+## Updating from upstream
 
-### Agents
+Rebase onto the new upstream tag. The port manifest ([PORTS.md](PORTS.md))
+lists exactly which seams to re-check, and behavior-pinning tests fail loudly if
+an upstream refactor moved a hunk. Fork upkeep procedure and rollback recipe:
+fork section of [AGENTS.md](AGENTS.md).
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+## Credit
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+All ported work is credited in [PORTS.md](PORTS.md) and in each commit's
+`(port of upstream #NNNNN)` trailer. Upstream authors did the hard diagnosis;
+this fork just ships it.
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+## About upstream
 
-Learn more about [agents](https://opencode.ai/docs/agents).
-
-### Documentation
-
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
-
-### Contributing
-
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
-
-### Building on OpenCode
-
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
-
----
-
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+This fork builds on [opencode](https://github.com/anomalyco/opencode) — the open
+source AI coding agent. See the
+[upstream README](https://github.com/anomalyco/opencode/tree/dev#readme) for
+everything not fork-specific.
