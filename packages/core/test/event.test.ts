@@ -154,6 +154,27 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("delivers duplicate listener registrations independently", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      let deliveries = 0
+      const listener = () =>
+        Effect.sync(() => {
+          deliveries++
+        })
+      const off1 = yield* events.listen(listener)
+      const off2 = yield* events.listen(listener)
+      yield* events.publish(Message, { text: "hello" })
+      expect(deliveries).toBe(2)
+      yield* off1
+      yield* events.publish(Message, { text: "second" })
+      expect(deliveries).toBe(3)
+      yield* off2
+      yield* events.publish(Message, { text: "third" })
+      expect(deliveries).toBe(3)
+    }),
+  )
+
   it.effect("runs projectors inline", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

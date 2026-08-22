@@ -1,6 +1,6 @@
 export * as EventV2 from "./event"
 
-import { Cause, Context, Effect, Layer, Option, PubSub, Queue, Schema, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Option, PubSub, Queue, Schema, Scope, Stream } from "effect"
 import { Event } from "@opencode-ai/schema/event"
 import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
 import { and, asc, eq, gt, inArray } from "drizzle-orm"
@@ -145,23 +145,14 @@ export interface Interface {
   ) => Effect.Effect<string | undefined>
   readonly remove: (aggregateID: string) => Effect.Effect<void>
   readonly claim: (aggregateID: string, ownerID: string) => Effect.Effect<void>
+  readonly allBounded: (
+    capacity: number,
+  ) => Effect.Effect<Stream.Stream<Payload, SubscriberOverflowError>, never, Scope.Scope>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Event") {}
 
-export const allBounded = (events: Interface, capacity: number) =>
-  Effect.gen(function* () {
-    const queue = yield* Queue.dropping<Payload, SubscriberOverflowError>(capacity)
-    const unsubscribe = yield* events.listen((event) =>
-      Queue.offer(queue, event).pipe(
-        Effect.flatMap((accepted) =>
-          accepted ? Effect.void : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
-        ),
-      ),
-    )
-    yield* Effect.addFinalizer(() => unsubscribe.pipe(Effect.andThen(Queue.shutdown(queue)), Effect.asVoid))
-    return Stream.fromQueue(queue)
-  })
+export const allBounded = (events: Interface, capacity: number) => events.allBounded(capacity)
 
 export interface LayerOptions {
   readonly beforeAggregateRead?: (aggregateID: string) => Effect.Effect<void>
@@ -605,6 +596,8 @@ export const layerWith = (options?: LayerOptions) =>
 
       const listen = (listener: Subscriber): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
+          // Array, not Set: duplicate registrations must each receive events
+          // and each unsubscribe must remove exactly one entry.
           listeners.push(listener)
           return Effect.sync(() => {
             const index = listeners.indexOf(listener)
@@ -619,6 +612,27 @@ export const layerWith = (options?: LayerOptions) =>
           projectors.set(definition.type, list)
         })
 
+      const allBounded = (capacity: number) =>
+        Effect.gen(function* () {
+          const queue = yield* Queue.dropping<Payload, SubscriberOverflowError>(capacity)
+          const subscription = yield* PubSub.subscribe(pubsub.all)
+          yield* Effect.forkScoped(
+            Stream.fromSubscription(subscription).pipe(
+              Stream.runForEach((event) =>
+                Queue.offer(queue, event).pipe(
+                  Effect.flatMap((accepted) =>
+                    accepted
+                      ? Effect.void
+                      : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
+                  ),
+                ),
+              ),
+            ),
+          )
+          yield* Effect.addFinalizer(() => Queue.shutdown(queue))
+          return Stream.fromQueue(queue)
+        })
+
       return Service.of({
         publish,
         subscribe,
@@ -630,6 +644,7 @@ export const layerWith = (options?: LayerOptions) =>
         replayAll,
         remove,
         claim,
+        allBounded,
       })
     }),
   )
