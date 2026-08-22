@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+import { compareChildSessions } from "./child-sessions"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
@@ -22,9 +23,7 @@ export function SubagentFooter() {
 
     if (!s.parentID) return { label, index: 0, total: 0 }
 
-    const siblings = sync.data.session
-      .filter((x) => x.parentID === s.parentID)
-      .toSorted((a, b) => a.time.created - b.time.created)
+    const siblings = sync.data.session.filter((x) => x.parentID === s.parentID).toSorted(compareChildSessions)
     const index = siblings.findIndex((x) => x.id === s.id)
 
     return { label, index: index + 1, total: siblings.length }
