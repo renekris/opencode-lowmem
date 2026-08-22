@@ -405,8 +405,8 @@ export const ShellTool = Tool.define(
         }
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
-          scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          scan.patterns.add(BashArity.permissionPattern(tokens, source(node)))
+          scan.always.add(BashArity.alwaysPattern(tokens))
         }
       }
 

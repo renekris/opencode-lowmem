@@ -8,6 +8,77 @@ export function prefix(tokens: string[]) {
   return tokens.slice(0, 1)
 }
 
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"])
+
+function executable(tokens: string[]) {
+  let index = 0
+  while (ASSIGNMENT.test(tokens[index] ?? "")) index++
+
+  if (tokens[index] === "env") {
+    index++
+    while (index < tokens.length) {
+      const token = tokens[index] ?? ""
+      if (ASSIGNMENT.test(token)) {
+        index++
+        continue
+      }
+      if (token === "-u" || token === "--unset" || token === "-C" || token === "--chdir") {
+        index += 2
+        continue
+      }
+      if (token.startsWith("-")) {
+        index++
+        continue
+      }
+      break
+    }
+  }
+
+  if (tokens[index] === "command") {
+    index++
+    while (tokens[index]?.startsWith("-")) index++
+  }
+  return tokens.slice(index)
+}
+
+function gitCommand(tokens: string[]) {
+  const input = executable(tokens)
+  if (input[0] !== "git") return
+
+  let index = 1
+  while (index < input.length) {
+    const token = input[index] ?? ""
+    if (token === "--") {
+      index++
+      break
+    }
+    if (!token.startsWith("-") || token === "-") break
+    if (GIT_GLOBAL_VALUE_OPTIONS.has(token)) {
+      index += 2
+      continue
+    }
+    index++
+  }
+
+  return ["git", ...input.slice(index)]
+}
+
+/**
+ * Keep Git permission matching scoped to the executable subcommand. Git
+ * arguments commonly contain paths and commit messages whose words must not be
+ * mistaken for a different subcommand by wildcard permission rules.
+ */
+export function permissionPattern(tokens: string[], fullCommand: string) {
+  const git = gitCommand(tokens)
+  if (!git) return fullCommand
+  return prefix(git).join(" ") + " *"
+}
+
+export function alwaysPattern(tokens: string[]) {
+  return prefix(gitCommand(tokens) ?? tokens).join(" ") + " *"
+}
+
 /* Generated with following prompt:
 You are generating a dictionary of command-prefix arities for bash-style commands.
 This dictionary is used to identify the "human-understandable command" from an input shell command.### **RULES (follow strictly)**1. Each entry maps a **command prefix string → number**, representing how many **tokens** define the command.
@@ -81,9 +152,12 @@ const ARITY: Record<string, number> = {
   gcloud: 3, // gcloud compute instances list
   gh: 3, // gh pr list
   git: 2, // git checkout main
+  "git branch": 3, // git branch --show-current
   "git config": 3, // git config user.name
+  "git reflog": 3, // git reflog show
   "git remote": 3, // git remote add origin
   "git stash": 3, // git stash pop
+  "git worktree": 3, // git worktree list
   go: 2, // go build
   gradle: 2, // gradle build
   helm: 2, // helm install mychart
