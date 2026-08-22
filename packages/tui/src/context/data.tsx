@@ -77,13 +77,26 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       directory: sdk.directory ?? process.cwd(),
     })
 
+    // Fork(lowmem): this mirror is write-only (consumers read session info,
+    // never session.message), so stale buckets are safe to drop by recency.
+    const MESSAGE_MIRROR_LIMIT = 20
+    const messageLRU: string[] = []
+
     const message = {
       update(sessionID: string, fn: (messages: SessionMessage[]) => void) {
+        const previous = messageLRU.lastIndexOf(sessionID)
+        if (previous !== -1) messageLRU.splice(previous, 1)
+        messageLRU.push(sessionID)
         setStore(
           "session",
           "message",
           produce((draft) => {
             fn((draft[sessionID] ??= []))
+            while (messageLRU.length > MESSAGE_MIRROR_LIMIT) {
+              const oldest = messageLRU.shift()
+              if (oldest === undefined) break
+              delete draft[oldest]
+            }
           }),
         )
       },

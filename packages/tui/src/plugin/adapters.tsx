@@ -95,7 +95,15 @@ function mapOptionCb<Value>(cb?: (item: TuiDialogSelectOption<Value>) => void) {
   return (item: SelectOption<Value>) => cb(pickOption(item))
 }
 
-function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
+export function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
+  // Fork(lowmem): legacy payload getters must not observe eviction as empty
+  // data — a missing bucket for an evicted session triggers a deduplicated
+  // refetch; ensure() remains the explicit awaitable variant.
+  const revive = (sessionID: string, present: boolean) => {
+    if (present) return
+    if (!sync.session.isEvicted(sessionID)) return
+    void sync.session.sync(sessionID).catch(() => {})
+  }
   return {
     get ready() {
       return sync.ready
@@ -124,15 +132,24 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
         return sync.session.get(sessionID)
       },
       diff(sessionID) {
-        return (sync.data.session_diff[sessionID] ?? []).flatMap((item) =>
-          item.file === undefined ? [] : [{ ...item, file: item.file }],
-        )
+        const value = sync.data.session_diff[sessionID]
+        revive(sessionID, value !== undefined)
+        return (value ?? []).flatMap((item) => (item.file === undefined ? [] : [{ ...item, file: item.file }]))
       },
       todo(sessionID) {
-        return sync.data.todo[sessionID] ?? []
+        const value = sync.data.todo[sessionID]
+        revive(sessionID, value !== undefined)
+        return value ?? []
       },
       messages(sessionID) {
-        return sync.data.message[sessionID] ?? []
+        const value = sync.data.message[sessionID]
+        revive(sessionID, value !== undefined)
+        return value ?? []
+      },
+      // Fork(lowmem): explicit opt-in rehydration for non-route sessions —
+      // reading messages() alone never refetches an evicted payload.
+      async ensure(sessionID) {
+        await sync.session.sync(sessionID)
       },
       status(sessionID) {
         return sync.data.session_status[sessionID]

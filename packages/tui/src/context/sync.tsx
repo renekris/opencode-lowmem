@@ -32,6 +32,7 @@ import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
+import { createPayloadEviction } from "./payload-eviction"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -157,6 +158,16 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
+    // Fork(lowmem): all payload-eviction logic lives in ./payload-eviction.
+    const payloadEviction = createPayloadEviction(store, setStore, {
+      fullSyncedSessions,
+      syncingSessions,
+      hydratingSessions,
+    })
+    // Fork(lowmem): assigned once `result` exists; declared here so the event
+    // handler can revive an evicted session that becomes active again.
+    let requestRevival: (sessionID: string) => void = () => {}
+
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
@@ -190,6 +201,7 @@ export const {
               draft.splice(match.index, 1)
             }),
           )
+          payloadEviction.compact()
           break
         }
 
@@ -237,6 +249,7 @@ export const {
               draft.splice(match.index, 1)
             }),
           )
+          payloadEviction.compact()
           break
         }
 
@@ -263,10 +276,12 @@ export const {
         }
 
         case "todo.updated":
+          if (payloadEviction.isEvicted(event.properties.sessionID)) break
           setStore("todo", event.properties.sessionID, event.properties.todos)
           break
 
         case "session.diff":
+          if (payloadEviction.isEvicted(event.properties.sessionID)) break
           setStore("session_diff", event.properties.sessionID, event.properties.diff)
           break
 
@@ -315,19 +330,29 @@ export const {
 
         case "session.status": {
           setStore("session_status", event.properties.sessionID, event.properties.status)
+          payloadEviction.compact()
           break
         }
 
         case "message.updated": {
+          if (payloadEviction.isEvicted(event.properties.info.sessionID)) {
+            // Activity on an evicted session revives it: hydration re-fetches
+            // authoritative state including this message.
+            const info = event.properties.info
+            if (info.role === "user" || info.time.completed === undefined) requestRevival(info.sessionID)
+            break
+          }
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
+            payloadEviction.compact()
             break
           }
           const result = search(messages, messageKey(event.properties.info), messageKey)
           if (result.found) {
             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
+            payloadEviction.compact()
             break
           }
           setStore(
@@ -356,11 +381,14 @@ export const {
               )
             })
           }
+          payloadEviction.compact()
           break
         }
         case "message.removed": {
+          if (payloadEviction.isEvicted(event.properties.sessionID)) break
           touchMessage(event.properties.sessionID, event.properties.messageID)
           const messages = store.message[event.properties.sessionID]
+          if (!messages) break
           const index = messages.findIndex((message) => message.id === event.properties.messageID)
           if (index !== -1) {
             setStore(
@@ -374,6 +402,7 @@ export const {
           break
         }
         case "message.part.updated": {
+          if (payloadEviction.isEvicted(event.properties.part.sessionID)) break
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
@@ -415,8 +444,10 @@ export const {
         }
 
         case "message.part.removed": {
-          touchPart(event.properties.sessionID, event.properties.partID)
+          if (payloadEviction.isEvicted(event.properties.sessionID)) break
           const parts = store.part[event.properties.messageID]
+          if (!parts) break
+          touchPart(event.properties.sessionID, event.properties.partID)
           const result = search(parts, event.properties.partID, (part) => part.id)
           if (result.found) {
             setStore(
@@ -569,6 +600,12 @@ export const {
         return project.instance.path()
       },
       session: {
+        activate(sessionID: string) {
+          payloadEviction.activate(sessionID)
+        },
+        isEvicted(sessionID: string) {
+          return payloadEviction.isEvicted(sessionID)
+        },
         get(sessionID: string) {
           const match = search(store.session, sessionID, (s) => s.id)
           if (match.found) return store.session[match.index]
@@ -592,6 +629,7 @@ export const {
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string) {
+          payloadEviction.viewed(sessionID)
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
@@ -661,12 +699,19 @@ export const {
           })().finally(() => {
             syncingSessions.delete(sessionID)
             hydratingSessions.delete(sessionID)
+            // Fork(lowmem): re-arm after tracker cleanup (protection checks the
+            // tracker maps), so a failed hydration gates late events again.
+            if (store.message[sessionID] === undefined) payloadEviction.remarkEvicted(sessionID)
+            payloadEviction.compact()
           })
           syncingSessions.set(sessionID, task)
           return task
         },
       },
       bootstrap,
+    }
+    requestRevival = (sessionID) => {
+      void result.session.sync(sessionID).catch(() => {})
     }
     return result
   },
