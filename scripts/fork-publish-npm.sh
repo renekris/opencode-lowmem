@@ -70,13 +70,14 @@ cat > "${dir}/bin/opencode" <<'EOF'
 #!/usr/bin/env node
 // Resolves the platform binary installed as an optionalDependency and execs it.
 const { spawn } = require("node:child_process")
-const path = require("node:path")
-const arch = process.arch === "x64" ? "x64" : process.arch
-const suffix = `${process.platform}-${arch}`
-// Prefer the exact match; baseline/musl variants exist for x64 linux.
+const fs = require("node:fs")
+const suffix = `${process.platform}-${process.arch}`
+const isMusl = suffix === "linux-x64" && fs.existsSync("/lib/ld-musl-x86_64.so.1")
 const candidates =
   suffix === "linux-x64"
-    ? ["linux-x64-musl", "linux-x64", "linux-x64-baseline-musl", "linux-x64-baseline"]
+    ? isMusl
+      ? ["linux-x64-musl", "linux-x64-baseline-musl", "linux-x64", "linux-x64-baseline"]
+      : ["linux-x64", "linux-x64-baseline", "linux-x64-musl", "linux-x64-baseline-musl"]
     : suffix === "darwin-x64"
       ? ["darwin-x64", "darwin-x64-baseline"]
       : [suffix]
