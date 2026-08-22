@@ -7,6 +7,9 @@ on:
       tag:
         description: "Tag to publish (e.g. v1.18.21-lowmem.6)"
         required: false
+permissions:
+  contents: read
+  id-token: write
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -16,13 +19,20 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: ${{ env.REF }} }
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with: { node-version: "24", registry-url: "https://registry.npmjs.org" }
+      - run: npm install -g npm@latest
       - name: Build platform binaries
-        run: cd packages/opencode && OPENCODE_VERSION="${GITHUB_REF_NAME#v}" OPENCODE_CHANNEL=latest bun run build
         env:
           GITHUB_REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: cd packages/opencode && OPENCODE_VERSION="${GITHUB_REF_NAME#v}" OPENCODE_CHANNEL=latest bun run build
       - name: Assemble and publish npm packages
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          if [ -n "${NPM_TOKEN}" ]; then
+            npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          else
+            echo "NPM_TOKEN not set — using trusted publishing (OIDC)"
+          fi
           ./scripts/fork-publish-npm.sh --publish
