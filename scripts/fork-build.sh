@@ -25,8 +25,8 @@ PLATFORM_BIN="dist/opencode-linux-x64/bin/opencode"
 
 cd "$ROOT"
 
-BASE="$(git describe --tags --abbrev=0 2>/dev/null | sed -e 's/^v//' -e "s/-${FLAVOR}.*\$//")"
-if [[ -z "$BASE" || "$BASE" == *"-*" ]]; then
+BASE="$(git describe --tags --abbrev=0 2>/dev/null | sed -e 's/^v//' -e "s/-${FLAVOR}\.[0-9]*\$//")"
+if [[ -z "$BASE" || "$BASE" == *"-${FLAVOR}"* ]]; then
   echo "fork-build: cannot determine upstream base tag from $(git describe --tags --abbrev=0 2>/dev/null || echo '<none>')" >&2
   exit 1
 fi
