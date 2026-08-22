@@ -619,9 +619,8 @@ export function RunSubagentSelectBody(props: {
     }
 
     const index = items().findIndex((item) => item.current)
-    if (index !== -1) {
-      menu.reveal(index)
-    }
+    // Fork (lowmem): conveyor defaults the cursor to the newest entry at the bottom.
+    menu.reveal(index !== -1 ? index : items().length - 1)
   })
 
   createEffect(() => {
