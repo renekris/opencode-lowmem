@@ -56,6 +56,7 @@ for p in "${PLATFORMS[@]}"; do
   "version": "${STAMP}",
   "description": "opencode-lowmem binary for ${p}",
   "license": "MIT",
+  "repository": { "url": "git+https://github.com/renekris/opencode-lowmem.git" },
   "os": ["$(npm_os "$p")"],
   "cpu": ["$(npm_cpu "$p")"]
 }
@@ -101,6 +102,7 @@ cat > "${dir}/package.json" <<EOF
   "version": "${STAMP}",
   "description": "Resource-bounded build of opencode: same agent, bounded memory",
   "license": "MIT",
+  "repository": { "url": "git+https://github.com/renekris/opencode-lowmem.git" },
   "bin": { "opencode": "bin/opencode" },
   "optionalDependencies": { ${OPTS} }
 }
