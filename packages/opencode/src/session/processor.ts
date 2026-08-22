@@ -331,13 +331,12 @@ const layer = Layer.effect(
 
           case "reasoning-delta":
             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
-            if (!(value.id in ctx.reasoningMap)) return
             // O(N) chunk-append instead of O(N²) string concat. For
             // thinking-mode models emitting 1500+ reasoning tokens per turn
             // over 80+ turns, `text += value.text` here pegs JSC's GC with
             // hundreds of MB of cumulative memmove work. The lazy getter
-            // installed at reasoning-start joins chunks on read; here we
-            // just push.
+            // installed at reasoning-start joins chunks on read; here we just push.
+            if (!(value.id in ctx.reasoningMap)) return
             ;(ctx.reasoningMap[value.id] as any)._chunks.push(value.text)
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
             yield* session.updatePartDelta({
@@ -542,9 +541,9 @@ const layer = Layer.effect(
             return
 
           case "text-delta":
-            if (!ctx.currentText) return
             // Same O(N²) fix as reasoning-delta above. The lazy getter
             // installed at text-start joins chunks on read; here we just push.
+            if (!ctx.currentText) return
             ;(ctx.currentText as any)._chunks.push(value.text)
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
@@ -703,9 +702,7 @@ const layer = Layer.effect(
               ctx.assistantMessage.finish === "unknown" &&
               ctx.assistantMessage.tokens.output === 0
             ) {
-              return yield* Effect.fail(
-                new ProviderError.ResponseStreamError("Provider returned an empty stream"),
-              )
+              return yield* Effect.fail(new ProviderError.ResponseStreamError("Provider returned an empty stream"))
             }
           }).pipe(
             Effect.onInterrupt(() =>
