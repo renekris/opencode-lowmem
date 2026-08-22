@@ -552,6 +552,7 @@ it.live("session.processor effect tests do not retry unknown json errors", () =>
         expect(value).toBe("stop")
         expect(yield* llm.calls).toBe(1)
         expect(handle.message.error?.name).toBe("APIError")
+        expect(handle.message.finish).toBe("error")
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -702,6 +703,119 @@ it.live("session.processor effect tests retry network_error finish reasons", () 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
         expect(parts.some((part) => part.type === "text" && part.text === "after retry")).toBe(true)
+        expect(handle.message.error).toBeUndefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor effect tests retries a clean EOF that produced no output", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.push(
+          raw({
+            chunks: [
+              {
+                id: "chatcmpl-clean-eof",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: { role: "assistant", content: "" } }],
+              },
+            ],
+          }),
+        )
+        yield* llm.text("after retry")
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "retry empty stream")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "retry empty stream" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(parts.some((part) => part.type === "text" && part.text === "after retry")).toBe(true)
+        expect(handle.message.error).toBeUndefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor effect tests does not retry a clean EOF that already streamed text", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.push(
+          raw({
+            chunks: [
+              {
+                id: "chatcmpl-text-eof",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: { role: "assistant", content: "partial answer" } }],
+              },
+            ],
+          }),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "text then clean eof")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "text then clean eof" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(1)
+        expect(parts.some((part) => part.type === "text" && part.text === "partial answer")).toBe(true)
         expect(handle.message.error).toBeUndefined()
       }),
     { config: (url) => providerCfg(url) },

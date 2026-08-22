@@ -13,6 +13,7 @@ import { Session } from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
+import { ProviderError } from "@/provider/error"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
@@ -27,6 +28,42 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+
+/**
+ * Replace `obj.text` with a lazy getter backed by an array of chunks so
+ * streaming text/reasoning deltas can be appended in O(1) instead of
+ * accumulated via `text += delta` (which is O(N²) once anything reads
+ * `.text` between writes — V8/JSC flatten the rope on every read and then
+ * re-copy on every subsequent `+=`).
+ *
+ * `_chunks` is non-enumerable so it does NOT leak through
+ * `JSON.stringify` / `structuredClone` / `{...obj}` to consumers. The
+ * `.text` getter materializes on first read, caches the joined string back
+ * into `_chunks` (so subsequent reads stay O(1)), and the setter resets
+ * `_chunks = [v]` so `obj.text = "..."` reassignments still work as
+ * expected. Same shape as the fix landed in vercel/ai for
+ * `processUIMessageStream` / `DefaultStreamTextResult`.
+ */
+function installChunkedText(obj: { text: string }): void {
+  Object.defineProperty(obj, "_chunks", {
+    value: [obj.text || ""],
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+  Object.defineProperty(obj, "text", {
+    get(): string {
+      const c = (this as any)._chunks as string[]
+      return c.length === 1 ? c[0] : ((this as any)._chunks = [c.join("")])[0]
+    },
+    set(v: string) {
+      ;(this as any)._chunks = [v]
+    },
+    enumerable: true,
+    configurable: true,
+  })
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -72,6 +109,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  observedStreamOutput: boolean
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +149,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        observedStreamOutput: false,
       }
       let aborted = false
 
@@ -288,13 +327,20 @@ const layer = Layer.effect(
               time: { start: Date.now() },
               metadata: value.providerMetadata,
             }
+            installChunkedText(ctx.reasoningMap[value.id])
             yield* session.updatePart(ctx.reasoningMap[value.id])
             return
 
           case "reasoning-delta":
             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
+            // O(N) chunk-append instead of O(N²) string concat. For
+            // thinking-mode models emitting 1500+ reasoning tokens per turn
+            // over 80+ turns, `text += value.text` here pegs JSC's GC with
+            // hundreds of MB of cumulative memmove work. The lazy getter
+            // installed at reasoning-start joins chunks on read; here we just push.
             if (!(value.id in ctx.reasoningMap)) return
-            ctx.reasoningMap[value.id].text += value.text
+            if (value.text) ctx.observedStreamOutput = true
+            ;(ctx.reasoningMap[value.id] as any)._chunks.push(value.text)
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
             yield* session.updatePartDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
@@ -316,6 +362,7 @@ const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
+            ctx.observedStreamOutput = true
             yield* ensureToolCall(value)
             return
 
@@ -493,12 +540,16 @@ const layer = Layer.effect(
               time: { start: Date.now() },
               metadata: value.providerMetadata,
             }
+            installChunkedText(ctx.currentText)
             yield* session.updatePart(ctx.currentText)
             return
 
           case "text-delta":
+            // Same O(N²) fix as reasoning-delta above. The lazy getter
+            // installed at text-start joins chunks on read; here we just push.
             if (!ctx.currentText) return
-            ctx.currentText.text += value.text
+            if (value.text) ctx.observedStreamOutput = true
+            ;(ctx.currentText as any)._chunks.push(value.text)
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
@@ -617,6 +668,7 @@ const layer = Layer.effect(
           return
         }
         ctx.assistantMessage.error = error
+        ctx.assistantMessage.finish = "error"
         yield* events.publish(Session.Event.Error, {
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
@@ -636,6 +688,7 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.observedStreamOutput = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
@@ -644,6 +697,22 @@ const layer = Layer.effect(
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
+
+            // A provider can close the stream cleanly without emitting any
+            // content or a real finish reason; the AI SDK reports finishReason
+            // "unknown" with zero usage in that case. Fail so the retry policy
+            // treats it like any other transient provider error instead of
+            // ending the turn silently. Only a truly empty attempt qualifies:
+            // deltas or tool calls already persisted output a retry would
+            // duplicate, and a missing usage block alone is not an error.
+            if (
+              !ctx.needsCompaction &&
+              !ctx.observedStreamOutput &&
+              ctx.assistantMessage.finish === "unknown" &&
+              ctx.assistantMessage.tokens.output === 0
+            ) {
+              return yield* Effect.fail(new ProviderError.ResponseStreamError("Provider returned an empty stream"))
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
