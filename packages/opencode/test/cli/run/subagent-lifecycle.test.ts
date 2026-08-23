@@ -141,15 +141,35 @@ function seedCompleted(data: SubagentData, count: number, options?: { skip?: Set
 }
 
 describe("subagent lifecycle conveyor", () => {
-  test("orders running tabs first, then completed oldest-to-newest", () => {
+  test("orders all tabs by last-updated ascending regardless of status", () => {
     const data = createSubagentData()
 
     seedCompleted(data, 3)
-    reduce(data, taskUpdated(runningTaskPart("child-run", 1)))
+    reduce(data, taskUpdated(runningTaskPart("child-old-run", 1)))
+    reduce(data, taskUpdated(runningTaskPart("child-new-run", 5000)))
 
     const tabs = listSubagentTabs(data)
-    expect(tabs.map((tab) => tab.sessionID)).toEqual(["child-run", "child-00", "child-01", "child-02"])
-    expect(tabs.map((tab) => tab.status)).toEqual(["running", "completed", "completed", "completed"])
+    expect(tabs.map((tab) => tab.sessionID)).toEqual([
+      "child-old-run",
+      "child-00",
+      "child-01",
+      "child-02",
+      "child-new-run",
+    ])
+    expect(tabs.map((tab) => tab.status)).toEqual(["running", "completed", "completed", "completed", "running"])
+  })
+
+  test("moves a resumed tab to the bottom instead of the top", () => {
+    const data = createSubagentData()
+
+    reduce(data, taskUpdated(completedTaskPart("child-a", 1000)))
+    reduce(data, taskUpdated(completedTaskPart("child-b", 2000)))
+    expect(listSubagentTabs(data).map((tab) => tab.sessionID)).toEqual(["child-a", "child-b"])
+
+    reduce(data, taskUpdated(runningTaskPart("child-a", 3000)))
+
+    expect(listSubagentTabs(data).map((tab) => tab.sessionID)).toEqual(["child-b", "child-a"])
+    expect(data.tabs.get("child-a")?.status).toBe("running")
   })
 
   test("evicts the oldest completed tab and detail beyond the limit", () => {

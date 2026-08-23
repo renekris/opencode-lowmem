@@ -794,21 +794,12 @@ function snapshotDetail(detail: DetailState) {
   }
 }
 
-// Fork (lowmem): running pinned top; completed in lastUpdatedAt ascending (newest at
-// the bottom where the user is looking). Eviction trims the oldest — see compactSubagentTabs.
+// Fork (lowmem): strict conveyor — lastUpdatedAt ascending, newest at the bottom
+// where the user is looking. Eviction trims the same end — see compactSubagentTabs.
 export function listSubagentTabs(data: SubagentData) {
-  return [...data.tabs.values()].sort((a, b) => {
-    const active = Number(b.status === "running") - Number(a.status === "running")
-    if (active !== 0) {
-      return active
-    }
-
-    if (a.status === "running") {
-      return b.lastUpdatedAt - a.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID)
-    }
-
-    return a.lastUpdatedAt - b.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID)
-  })
+  return [...data.tabs.values()].sort(
+    (a, b) => a.lastUpdatedAt - b.lastUpdatedAt || a.sessionID.localeCompare(b.sessionID),
+  )
 }
 
 function snapshotQueues(data: SubagentData) {
