@@ -49,16 +49,17 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 ### Long-session RAM (2026-08-24)
 
 - **TUI delta coalescing** (`packages/tui/src/context/part-delta-buffer.ts`, sync.tsx wiring):
-  the TUI-side twin of upstream #42150 — `message.part.delta` appends ran O(n²) string churn
-  inside the Solid store for every hosted session (background subagents included). Deltas now
-  coalesce per message/part/field and apply every 120ms; `part.updated`/`message.updated` drop
-  pending buffers (authoritative state wins).
+  the TUI-side twin of upstream #42150 (hardes11 — also the basis of our server-side port) —
+  `message.part.delta` appends ran O(n²) string churn inside the Solid store for every hosted
+  session (background subagents included). Deltas now coalesce per message/part/field and apply
+  every 120ms; `part.updated`/`message.updated` drop pending buffers (authoritative state wins).
 - **updatePart shallow copy** (`packages/opencode/src/session/session.ts`): replaces
-  `structuredClone(part)` on every PartUpdated publish (upstream #35107; fix shape from closed
-  #43733). Verified safe: no consumer mutates nested part fields in place; TUI stores via
-  `reconcile()`.
+  `structuredClone(part)` on every PartUpdated publish — issue reported by xingruodong-sys
+  (#35107), fix shape from ColeLindfors' closed-unmerged #43733. Verified safe: no consumer
+  mutates nested part fields in place; TUI stores via `reconcile()`.
 - **session.deleted bucket cleanup** (`packages/tui/src/context/sync.tsx`): deleted sessions
-  leaked message/part/session_diff/session_status buckets (upstream #12351).
+  leaked message/part/session_diff/session_status buckets — issue reported by Limme-swe
+  (#12351).
 
 ### Child-conveyor ordering (daily TUI)
 
