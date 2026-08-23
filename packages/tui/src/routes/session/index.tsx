@@ -24,6 +24,7 @@ import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { compareChildSessions, cycleChildSessionID, newestChildSessionID } from "./child-sessions"
+import { inboundChildRank } from "./child-inbound"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
@@ -448,7 +449,7 @@ export function Session() {
   function moveFirstChild() {
     if (children().length === 1) return
     // Fork(lowmem): super+down enters the newest child (conveyor tail).
-    const next = newestChildSessionID(children())
+    const next = newestChildSessionID(children(), inboundChildRank)
     if (next) enterChild(next)
   }
 
@@ -456,7 +457,7 @@ export function Session() {
     if (children().length === 1) return
     // Fork(lowmem): +1 steps toward the newest child, -1 toward the oldest,
     // wrapping circularly in conveyor order.
-    const next = cycleChildSessionID(children(), session()?.id, direction === 1 ? 1 : -1)
+    const next = cycleChildSessionID(children(), session()?.id, direction === 1 ? 1 : -1, inboundChildRank)
     if (next) enterChild(next)
   }
 

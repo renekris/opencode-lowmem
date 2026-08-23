@@ -33,6 +33,7 @@ import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 import { createPayloadEviction } from "./payload-eviction"
+import { forgetInboundChild, noteInboundMessage } from "../routes/session/child-inbound"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -286,6 +287,7 @@ export const {
           break
 
         case "session.deleted": {
+          forgetInboundChild(event.properties.info.id)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -335,6 +337,9 @@ export const {
         }
 
         case "message.updated": {
+          // Fork(lowmem): rank inbound messages before the eviction gate so
+          // evicted children still reorder by receipt.
+          noteInboundMessage(event.properties.info)
           if (payloadEviction.isEvicted(event.properties.info.sessionID)) {
             // Activity on an evicted session revives it: hydration re-fetches
             // authoritative state including this message.
