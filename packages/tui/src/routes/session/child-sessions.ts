@@ -1,16 +1,15 @@
 type ChildSessionLike = {
   id: string
   parentID?: string
-  time: { created: number; updated: number }
+  time: { created: number }
 }
 
 // Fork(lowmem): child sessions use one conveyor order everywhere —
-// last activity ascending (least recently active first, latest last),
-// keyed on time.updated (bumped by Session.touch at every prompt). The
-// id tie-break is DESCENDING because SessionID.descending() encodes
-// later creation as a lexically smaller id within the same millisecond.
+// creation time ascending (oldest first, newest last). The id tie-break
+// is DESCENDING because SessionID.descending() encodes later creation
+// as a lexically smaller id within the same millisecond.
 export function compareChildSessions(a: ChildSessionLike, b: ChildSessionLike): number {
-  return a.time.updated - b.time.updated || (a.id > b.id ? -1 : a.id < b.id ? 1 : 0)
+  return a.time.created - b.time.created || (a.id > b.id ? -1 : a.id < b.id ? 1 : 0)
 }
 
 function childSessions(sessions: ChildSessionLike[]): ChildSessionLike[] {
