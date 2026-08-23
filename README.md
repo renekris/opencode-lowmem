@@ -45,8 +45,6 @@ this fork ~1 GB.
 |---|---|---|
 | Diff-patch caps | Snapshots of large edits can't balloon memory and disk | per-patch 100 KB, 256 KB aggregate; summaries store metadata and recompute on read |
 | Subagent tab eviction | The subagent list keeps the newest 50 finished agents, not every one ever spawned | running, pinned, and permission-holding sessions are exempt; evicted agents revive if they ask again; 256-entry revival memory |
-| Conveyor ordering | Finished subagents stack oldest-first — the bottom of the list is always the latest | deterministic even for same-millisecond session IDs |
-| Conveyor navigation | Tab/arrows move through child sessions in creation order; footer and session list finally agree | shared comparator with a causal same-millisecond tie-break |
 | Git subcommand classifier | "Always allow" for `git -C ../worktree commit` stores `git commit *` — never junk, never a wider grant than you approved | env/command unwrapping + git global-option skipping + scoped patterns |
 
 Provenance, per-round history, the durability/rebase policy, and the

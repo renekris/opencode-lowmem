@@ -43,7 +43,7 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `b89cf97a35` | fix(opencode): cap aggregate stored diff patches | 256KB cumulative per snapshot op |
 | `dd77d3619d` | fix(opencode): avoid storing summary diff patches | summary diffs store metadata; recompute on read |
 | `7d6933befb` | fix(permission): classify git subcommands | env/-C/-c wrapper-aware git subcommand classification; scopes git permission patterns to the real subcommand. Not memory-related — kept because this fork is the daily driver and upstream still lacks it (verified at v1.18.21); good candidate to contribute upstream |
-| `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; conveyor ordering |
+| `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; list ordering stays upstream |
 | `0ad600c39a` (refined `86fe0d6536`, tests `98e7dd83a7`) | fix(opencode): background-safe settlement + eviction revival | Background parts stay "running" until the synthetic injection settles them (synthetic-gated; user text cannot spoof). Evicted sessions revive on queued permission/question (256-entry memory). Reply events re-compact to release guard slots. Deterministic tie-breaks |
 
 ### Subagent-eviction upstream coupling (review guidance)
@@ -51,7 +51,8 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 The fork delta is deliberately concentrated; when rebasing, check these seams first:
 
 - `packages/opencode/src/cli/cmd/run/subagent-data.ts` — nearly all fork logic lives here
-  (compact/settle/revive helpers, `knownSubagentSession`, conveyor ordering). Upstream
+  (compact/settle/revive helpers, `knownSubagentSession`; list ordering is upstream's).
+  Upstream
   churn inside `taskTab`, `syncTaskTab`, `reduceSubagentData`, or `bootstrapSubagentData`
   needs the fork hunks re-checked, not re-derived.
 - `packages/opencode/src/cli/cmd/run/stream.transport.ts` — 8-line delta: import +
