@@ -30,8 +30,8 @@ if [[ -z "$BASE" || "$BASE" == *"-${FLAVOR}"* ]]; then
   echo "fork-build: cannot determine upstream base tag from $(git describe --tags --abbrev=0 2>/dev/null || echo '<none>')" >&2
   exit 1
 fi
-COUNT="$(git tag -l "v${BASE}-${FLAVOR}.*" | /usr/bin/wc -l | tr -d ' ')"
-ROUND="$((COUNT + 1))"
+LAST_ROUND="$(git tag -l "v${BASE}-${FLAVOR}.*" | sed -e "s/^v${BASE}-${FLAVOR}\.//" | sort -n | tail -1)"
+ROUND="$(( ${LAST_ROUND:-0} + 1 ))"
 STAMP="${BASE}-${FLAVOR}.${ROUND}"
 
 echo "==> building opencode ${STAMP} (channel=${CHANNEL})"
