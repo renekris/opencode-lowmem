@@ -72,15 +72,32 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 
 ## Install
 
-### One-liner (prebuilt binaries from GitHub Releases)
+> **Made for the terminal.** This fork targets `opencode` in the terminal (the
+> TUI) — the daily driver it was built from, and where every memory bound is
+> tested. Everything else (web UI, `opencode serve`, desktop/IDE clients) keeps
+> working and inherits the server-side fixes too, but the UI-side memory wins
+> are terminal-only.
+
+### One command (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/renekris/opencode-lowmem/lowmem/scripts/fork-install.sh | bash
 ```
 
-Detects your platform, verifies the SHA-256 digest against the release asset,
-and installs to `~/.opencode/bin/opencode`. Running sessions are never killed;
-new sessions pick up the new build.
+The script detects your OS and CPU (Linux/macOS/Windows, including
+musl-vs-glibc on Linux), downloads the matching binary from the latest GitHub
+release, verifies its SHA-256 against the release digest, and installs it to
+`~/.opencode/bin/opencode`.
+
+Then run `opencode` as usual:
+
+1. Open sessions are never killed — they keep their old build.
+2. Every **new** session runs the lowmem build.
+3. Auth, config, sessions, and plugins carry over unchanged — same
+   `opencode.db`, same settings, nothing to migrate.
+
+Going back to stock opencode later is just reinstalling the upstream binary the
+way you originally installed it; the shared database needs no changes.
 
 ### Build from source
 
