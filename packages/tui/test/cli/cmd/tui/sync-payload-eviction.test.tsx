@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/solid */
+import { inboundChildRank } from "../../../../src/routes/session/child-inbound"
 import { expect, test } from "bun:test"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../../fixture/fixture"
@@ -436,6 +437,73 @@ test("activity on an evicted session revives its payloads", async () => {
   }
 })
 
+test("root session user messages do not consume conveyor rank capacity", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const root = row("ses_root_a")
+    emit(global({ id: "evt_root_row", type: "session.updated", properties: { sessionID: root.id, info: root } }))
+    emit(
+      global({
+        id: "evt_root_msg",
+        type: "message.updated",
+        properties: {
+          sessionID: root.id,
+          info: {
+            id: "msg_root_user",
+            sessionID: root.id,
+            role: "user" as const,
+            time: { created: 99 },
+            agent: "build",
+            model: { providerID: "test", modelID: "test" },
+          },
+        },
+      }),
+    )
+    await wait(() => inboundChildRank(root.id) === undefined && true)
+    expect(inboundChildRank(root.id)).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("user messages for unknown sessions rank provisionally until a row proves them root", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const sid = "ses_mystery"
+    emit(
+      global({
+        id: "evt_mystery_msg",
+        type: "message.updated",
+        properties: {
+          sessionID: sid,
+          info: {
+            id: "msg_mystery_user",
+            sessionID: sid,
+            role: "user" as const,
+            time: { created: 42 },
+            agent: "build",
+            model: { providerID: "test", modelID: "test" },
+          },
+        },
+      }),
+    )
+    await wait(() => inboundChildRank(sid) !== undefined)
+    expect(inboundChildRank(sid)).toBeDefined()
+
+    const rootRow = row(sid)
+    emit(global({ id: "evt_mystery_row", type: "session.updated", properties: { sessionID: sid, info: rootRow } }))
+    await wait(() => inboundChildRank(sid) === undefined)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("legacy plugin payload getters refetch evicted session payloads", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
@@ -465,9 +533,9 @@ test("a failed revival re-arms the eviction gate for orphan parts", async () => 
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const base = fetchFor()
   const { app, emit, sync } = await mount((url) => {
-      if (url.pathname === `/session/ses_fail_00`) {
-        return json({ error: "boom" }, { status: 500 })
-      }
+    if (url.pathname === `/session/ses_fail_00`) {
+      return json({ error: "boom" }, { status: 500 })
+    }
     return base(url)
   }, tmp.path)
 

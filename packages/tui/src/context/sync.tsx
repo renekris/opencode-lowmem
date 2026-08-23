@@ -300,6 +300,7 @@ export const {
           break
         }
         case "session.updated": {
+          if (event.properties.info.parentID === undefined) forgetInboundChild(event.properties.info.id)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore("session", result.index, reconcile(event.properties.info))
@@ -338,8 +339,14 @@ export const {
 
         case "message.updated": {
           // Fork(lowmem): rank inbound messages before the eviction gate so
-          // evicted children still reorder by receipt.
-          noteInboundMessage(event.properties.info)
+          // evicted children still reorder by receipt. Known root sessions
+          // are skipped so their traffic cannot evict child ranks from the
+          // bounded map; unknown sessions rank provisionally until their
+          // session row proves otherwise.
+          const rankedRow = search(store.session, event.properties.info.sessionID, (s) => s.id)
+          if (!rankedRow.found || store.session[rankedRow.index]?.parentID !== undefined) {
+            noteInboundMessage(event.properties.info)
+          }
           if (payloadEviction.isEvicted(event.properties.info.sessionID)) {
             // Activity on an evicted session revives it: hydration re-fetches
             // authoritative state including this message.

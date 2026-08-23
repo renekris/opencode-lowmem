@@ -149,6 +149,15 @@ describe("child conveyor window", () => {
     expect(cycleChildSessionID(kids, "c1", -1, undefined)).toBe("c52")
   })
 
+  test("pinning a ranked out-of-window child displaces the pre-sort window head", () => {
+    const rank = ranker({ c2: { at: 0, ordinal: 0 } })
+    const w = childSessionWindow(many(52), rank, "c2")
+    expect(w.length).toBe(50)
+    expect(w[0]?.id).toBe("c2")
+    expect(w.some((x) => x.id === "c3")).toBe(false)
+    expect(w.at(-1)?.id).toBe("c52")
+  })
+
   test("a ranked old child re-enters at the tail and drops the window head", () => {
     const rank = ranker({ c1: { at: 100, ordinal: 0 } })
     const w = childSessionWindow(many(52), rank)

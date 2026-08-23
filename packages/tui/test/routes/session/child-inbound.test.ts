@@ -50,6 +50,16 @@ describe("child-inbound rank tracker", () => {
     expect(inboundChildRank("s1")).toBeUndefined()
   })
 
+  test("LRU refresh keeps a re-messaged session alive past capacity", () => {
+    noteInboundMessage(userMsg("s-refresh", "m-r1", 1))
+    noteInboundMessage(userMsg("s-cold", "m-c1", 2))
+    noteInboundMessage(userMsg("s-refresh", "m-r2", 3))
+    for (let i = 0; i < 255; i++) noteInboundMessage(userMsg(`s-warm-${i}`, `m-w${i}`, 4 + i))
+    expect(inboundChildRank("s-refresh")).toBeDefined()
+    expect(inboundChildRank("s-cold")).toBeUndefined()
+    expect(inboundChildRank("s-warm-0")).toBeDefined()
+  })
+
   test("caps tracked children at 256, evicting the least recently updated entry", () => {
     noteInboundMessage(userMsg("s-old", "m-old", 1))
     for (let i = 0; i < 256; i++) noteInboundMessage(userMsg(`s-${i}`, `m-${i}`, 10 + i))

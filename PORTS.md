@@ -53,7 +53,9 @@ continuation, direct input). Signal is client-side: `packages/tui/src/routes/ses
 ranks `message.updated` events with `role === "user"` (bounded 256-entry map, consumed before
 the payload-eviction gate; `session.deleted` cleans up; creation-time fallback after restart). The conveyor shows at most the newest 50
 children (CHILD_CONVEYOR_LIMIT); a viewed child outside the window is pinned in by displacing
-the window's oldest member.
+the window's oldest member. The run-mode tab list intentionally keeps its own
+lifecycle/activity ordering (status-centric menu), diverging from the daily TUI's
+inbound-receipt conveyor.
 Known deviations: plan-tool self-injections and compaction auto-continue replays also write user
 messages and move the child. Exact alternative rejected: a `session.message.received` server
 event (Oracle design) — requires an event-contract change; revisit only if the deviations matter.
