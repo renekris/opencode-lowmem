@@ -43,8 +43,18 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `b89cf97a35` | fix(opencode): cap aggregate stored diff patches | 256KB cumulative per snapshot op |
 | `dd77d3619d` | fix(opencode): avoid storing summary diff patches | summary diffs store metadata; recompute on read |
 | `7d6933befb` | fix(permission): classify git subcommands | env/-C/-c wrapper-aware git subcommand classification; scopes git permission patterns to the real subcommand. Not memory-related — kept because this fork is the daily driver and upstream still lacks it (verified at v1.18.21); good candidate to contribute upstream |
-| `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt; list ordering stays upstream |
+| `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt |
 | `0ad600c39a` (refined `86fe0d6536`, tests `98e7dd83a7`) | fix(opencode): background-safe settlement + eviction revival | Background parts stay "running" until the synthetic injection settles them (synthetic-gated; user text cannot spoof). Evicted sessions revive on queued permission/question (256-entry memory). Reply events re-compact to release guard slots. Deterministic tie-breaks |
+
+### Child-conveyor ordering (daily TUI)
+
+Child sessions reorder only when they RECEIVE a user message (delegation, task_id
+continuation, direct input). Signal is client-side: `packages/tui/src/routes/session/child-inbound.ts`
+ranks `message.updated` events with `role === "user"` (bounded 256-entry map, consumed before
+the payload-eviction gate; `session.deleted` cleans up; creation-time fallback after restart).
+Known deviations: plan-tool self-injections and compaction auto-continue replays also write user
+messages and move the child. Exact alternative rejected: a `session.message.received` server
+event (Oracle design) — requires an event-contract change; revisit only if the deviations matter.
 
 ### Subagent-eviction upstream coupling (review guidance)
 
