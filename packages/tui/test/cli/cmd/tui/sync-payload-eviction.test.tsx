@@ -437,6 +437,97 @@ test("activity on an evicted session revives its payloads", async () => {
   }
 })
 
+test("streams deltas through the coalescing buffer", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_delta", 3)
+    const sid = ids[0]!
+    const mid = `msg_${sid}_a0`
+    emit(
+      global({
+        id: "evt_delta_row",
+        type: "session.updated",
+        properties: { sessionID: sid, info: row(sid) },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_delta_msg",
+        type: "message.updated",
+        properties: {
+          sessionID: sid,
+          info: {
+            id: mid,
+            sessionID: sid,
+            role: "assistant" as const,
+            agent: "build",
+            model: { providerID: "test", modelID: "test" },
+            time: { created: 1 },
+          },
+        },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_delta_part",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          time: 2,
+          part: { id: `part_${mid}_t`, messageID: mid, sessionID: sid, type: "text", text: "" },
+        },
+      }),
+    )
+    await wait(() => (sync.data.part[mid]?.length ?? 0) === 1)
+    emit(
+      global({
+        id: "evt_delta_d1",
+        type: "message.part.delta",
+        properties: { sessionID: sid, messageID: mid, partID: `part_${mid}_t`, field: "text", delta: "hel" },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_delta_d2",
+        type: "message.part.delta",
+        properties: { sessionID: sid, messageID: mid, partID: `part_${mid}_t`, field: "text", delta: "lo" },
+      }),
+    )
+    await wait(() => (sync.data.part[mid]?.[0] as { text?: string })?.text === "hello")
+    expect((sync.data.part[mid]?.[0] as { text: string }).text).toBe("hello")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("session.deleted drops message and part buckets", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_gone", 3)
+    await wait(() => ids.every((id) => sync.data.message[id]?.length === 1))
+    const sid = ids[0]!
+    const mid = `msg_${sid}_a0`
+    emit(
+      global({
+        id: "evt_gone_del",
+        type: "session.deleted",
+        properties: { sessionID: sid, info: { id: sid } },
+      }),
+    )
+    await wait(() => sync.data.session.find((x) => x.id === sid) === undefined)
+    expect(sync.data.message[sid]).toBeUndefined()
+    expect(sync.data.part[mid]).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("root session user messages do not consume conveyor rank capacity", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")

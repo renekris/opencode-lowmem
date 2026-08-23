@@ -46,6 +46,20 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 | `8746b60407` | feat(opencode): bound subagent tabs with keep-last-N eviction | 50 completed tabs/details; running, pinned, and blocker-holding sessions exempt |
 | `0ad600c39a` (refined `86fe0d6536`, tests `98e7dd83a7`) | fix(opencode): background-safe settlement + eviction revival | Background parts stay "running" until the synthetic injection settles them (synthetic-gated; user text cannot spoof). Evicted sessions revive on queued permission/question (256-entry memory). Reply events re-compact to release guard slots. Deterministic tie-breaks |
 
+### Long-session RAM (2026-08-24)
+
+- **TUI delta coalescing** (`packages/tui/src/context/part-delta-buffer.ts`, sync.tsx wiring):
+  the TUI-side twin of upstream #42150 — `message.part.delta` appends ran O(n²) string churn
+  inside the Solid store for every hosted session (background subagents included). Deltas now
+  coalesce per message/part/field and apply every 120ms; `part.updated`/`message.updated` drop
+  pending buffers (authoritative state wins).
+- **updatePart shallow copy** (`packages/opencode/src/session/session.ts`): replaces
+  `structuredClone(part)` on every PartUpdated publish (upstream #35107; fix shape from closed
+  #43733). Verified safe: no consumer mutates nested part fields in place; TUI stores via
+  `reconcile()`.
+- **session.deleted bucket cleanup** (`packages/tui/src/context/sync.tsx`): deleted sessions
+  leaked message/part/session_diff/session_status buckets (upstream #12351).
+
 ### Child-conveyor ordering (daily TUI)
 
 Child sessions reorder only when they RECEIVE a user message (delegation, task_id

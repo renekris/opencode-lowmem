@@ -34,6 +34,7 @@ import { useKV } from "./kv"
 import { usePermission } from "./permission"
 import { createPayloadEviction } from "./payload-eviction"
 import { forgetInboundChild, noteInboundMessage } from "../routes/session/child-inbound"
+import { createPartDeltaBuffer } from "./part-delta-buffer"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -165,6 +166,25 @@ export const {
       syncingSessions,
       hydratingSessions,
     })
+    // Fork(lowmem): coalesce message.part.delta writes (see part-delta-buffer).
+    const partDeltaBuffer = createPartDeltaBuffer({
+      apply: ({ messageID, partID, field, accumulated }) => {
+        const parts = store.part[messageID]
+        if (!parts) return
+        const result = search(parts, partID, (part) => part.id)
+        if (!result.found) return
+        setStore(
+          "part",
+          messageID,
+          produce((draft) => {
+            const part = draft[result.index]
+            const partField = field as keyof typeof part
+            const current = part[partField] as string | undefined
+            ;(part[partField] as string) = (current ?? "") + accumulated
+          }),
+        )
+      },
+    })
     // Fork(lowmem): assigned once `result` exists; declared here so the event
     // handler can revive an evicted session that becomes active again.
     let requestRevival: (sessionID: string) => void = () => {}
@@ -288,6 +308,19 @@ export const {
 
         case "session.deleted": {
           forgetInboundChild(event.properties.info.id)
+          // Fork(lowmem): drop payload buckets too, or deleted sessions leak
+          // in the store (upstream #12351).
+          for (const msg of store.message[event.properties.info.id] ?? []) {
+            partDeltaBuffer.dropMessage(msg.id)
+          }
+          setStore(
+            produce((draft) => {
+              for (const msg of draft.message[event.properties.info.id] ?? []) delete draft.part[msg.id]
+              delete draft.message[event.properties.info.id]
+              delete draft.session_diff[event.properties.info.id]
+              delete draft.session_status[event.properties.info.id]
+            }),
+          )
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -338,6 +371,7 @@ export const {
         }
 
         case "message.updated": {
+          partDeltaBuffer.dropMessage(event.properties.info.id)
           // Fork(lowmem): rank inbound messages before the eviction gate so
           // evicted children still reorder by receipt. Known root sessions
           // are skipped so their traffic cannot evict child ranks from the
@@ -415,6 +449,7 @@ export const {
         }
         case "message.part.updated": {
           if (payloadEviction.isEvicted(event.properties.part.sessionID)) break
+          partDeltaBuffer.dropMessage(event.properties.part.messageID)
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
@@ -442,16 +477,12 @@ export const {
           const result = search(parts, event.properties.partID, (part) => part.id)
           if (!result.found) break
           touchPart(event.properties.sessionID, event.properties.partID)
-          setStore(
-            "part",
-            event.properties.messageID,
-            produce((draft) => {
-              const part = draft[result.index]
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + event.properties.delta
-            }),
-          )
+          partDeltaBuffer.push({
+            messageID: event.properties.messageID,
+            partID: event.properties.partID,
+            field: String(event.properties.field),
+            delta: event.properties.delta,
+          })
           break
         }
 

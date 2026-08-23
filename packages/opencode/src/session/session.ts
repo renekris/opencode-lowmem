@@ -634,9 +634,12 @@ const layer: Layer.Layer<
 
     const updatePart = <T extends SessionV1.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        // Fork(lowmem): shallow copy, not structuredClone — parts grow large in
+        // long sessions and consumers never mutate nested fields in place
+        // (upstream #35107; see also closed #43733).
         yield* events.publish(SessionV1.Event.PartUpdated, {
           sessionID: part.sessionID,
-          part: structuredClone(part),
+          part: { ...part },
           time: Date.now(),
         })
         return part
