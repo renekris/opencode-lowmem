@@ -5,19 +5,34 @@ import {
   newestChildSessionID,
 } from "../../../src/routes/session/child-sessions"
 
-const child = (id: string, created: number) => ({ id, parentID: "parent", time: { created } })
-const parent: { id: string; parentID?: string; time: { created: number } } = { id: "parent", time: { created: 0 } }
+const child = (id: string, created: number, updated = created) => ({
+  id,
+  parentID: "parent",
+  time: { created, updated },
+})
+const parent: { id: string; parentID?: string; time: { created: number; updated: number } } = {
+  id: "parent",
+  time: { created: 0, updated: 0 },
+}
 
 const sessions = () => [parent, child("b", 20), child("a", 10), child("c", 30)]
 
-test("orders children by creation time ascending", () => {
+test("orders children by last activity ascending", () => {
   const ordered = sessions()
     .filter((x) => x.parentID !== undefined)
     .sort(compareChildSessions)
   expect(ordered.map((x) => x.id)).toEqual(["a", "b", "c"])
 })
 
-test("breaks creation-time ties by descending id (later creation = smaller id)", () => {
+test("moves a re-activated stale child to the conveyor tail", () => {
+  const stale = child("a", 10)
+  const activated = [parent, child("b", 20), { ...stale, time: { ...stale.time, updated: 40 } }, child("c", 30)]
+  expect(newestChildSessionID(activated)).toBe("a")
+  const ordered = activated.filter((x) => x.parentID !== undefined).sort(compareChildSessions)
+  expect(ordered.map((x) => x.id)).toEqual(["b", "c", "a"])
+})
+
+test("breaks activity ties by descending id (later creation = smaller id)", () => {
   expect(compareChildSessions(child("a", 5), child("b", 5))).toBe(1)
   expect(compareChildSessions(child("b", 5), child("a", 5))).toBe(-1)
   expect(compareChildSessions(child("a", 5), child("a", 5))).toBe(0)
