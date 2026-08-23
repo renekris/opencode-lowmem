@@ -13,8 +13,8 @@ the pre-rewrite state. New work = new commits + a new lowmem round.
 
 This checkout is a **resource-bounded fork** of anomalyco/opencode: full capability,
 bounded footprint. Charter: every patch must bound a resource without removing a
-capability. Read `PORTS.md` (port manifest + credit — keep it updated on every port)
-before changing fork policy.
+capability. The README is the authoritative fork document (ported fixes, customs,
+not-ported list, credit — keep its tables updated on every port).
 
 ## Hard rules
 
@@ -43,11 +43,11 @@ before changing fork policy.
 5. Sweep upstream for new unmerged memory/perf PRs:
    `gh api "search/issues?q=repo:anomalyco/opencode+is:pr+is:open+memory+OR+leak+OR+RSS"`.
    Filter: fixes only, not features; check `merged_at == null`; read thread for
-   maintainer signals. Evaluate each against the charter + not-port list in PORTS.md.
+   maintainer signals. Evaluate each against the charter + the README's not-ported table.
 6. Port candidates: `gh pr diff <N> --repo anomalyco/opencode > /tmp/pr<N>.diff`,
    then `git apply --check /tmp/pr<N>.diff` (must be CLEAN or trivially 3-way).
-   Commit as `type(scope): summary (port of upstream #N)`; add row to PORTS.md with
-   author credit. Never drop the credit trailer.
+   Commit as `type(scope): summary (port of upstream #N)`; add a row to the README's ported-fixes table
+   with author credit. Never drop the credit trailer.
 7. Test the affected suites (minimum): `message-v2` pagination, `processor-effect`,
    `config`, plus the customs' suites — `diff-limits`, `summary-memory`, `arity`
    (in `packages/opencode` and `packages/core` as appropriate; `bun test <file>`).
@@ -57,7 +57,7 @@ before changing fork policy.
    `opencode-<channel>.db` instead of the real db.
 9. Sandbox proof before declaring done: `XDG_DATA_HOME=<copy-dir> <dist binary> session list`
    must render sessions with exit 0.
-10. Update PORTS.md (statuses, new base tag) and this file only if the procedure changed.
+10. Update README (fix-table statuses, new base tag) and this file only if the procedure changed.
 
 Rollback: `git checkout local-diff-caps && ./scripts/fork-build.sh`.
 
