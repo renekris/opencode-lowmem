@@ -51,7 +51,9 @@ Each port commit message carries `(port of upstream #NNNNN)`; do not drop that t
 Child sessions reorder only when they RECEIVE a user message (delegation, task_id
 continuation, direct input). Signal is client-side: `packages/tui/src/routes/session/child-inbound.ts`
 ranks `message.updated` events with `role === "user"` (bounded 256-entry map, consumed before
-the payload-eviction gate; `session.deleted` cleans up; creation-time fallback after restart).
+the payload-eviction gate; `session.deleted` cleans up; creation-time fallback after restart). The conveyor shows at most the newest 50
+children (CHILD_CONVEYOR_LIMIT); a viewed child outside the window is pinned in by displacing
+the window's oldest member.
 Known deviations: plan-tool self-injections and compaction auto-continue replays also write user
 messages and move the child. Exact alternative rejected: a `session.message.received` server
 event (Oracle design) — requires an event-contract change; revisit only if the deviations matter.

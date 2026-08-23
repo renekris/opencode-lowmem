@@ -28,9 +28,28 @@ function childSessions(sessions: ChildSessionLike[], rank?: ChildRankLookup): Ch
   return sessions.filter((x) => x.parentID !== undefined).sort((a, b) => compareChildSessions(a, b, rank))
 }
 
+export const CHILD_CONVEYOR_LIMIT = 50
+
+// Fork(lowmem): the conveyor shows at most the newest CHILD_CONVEYOR_LIMIT
+// children. A viewed child outside the window is pinned in by displacing the
+// window's oldest member, so the footer always renders a valid "N of 50".
+export function childSessionWindow(
+  sessions: ChildSessionLike[],
+  rank?: ChildRankLookup,
+  currentID?: string,
+): ChildSessionLike[] {
+  const ordered = childSessions(sessions, rank)
+  const window = ordered.slice(-CHILD_CONVEYOR_LIMIT)
+  if (currentID === undefined) return window
+  if (window.some((x) => x.id === currentID)) return window
+  const current = ordered.find((x) => x.id === currentID)
+  if (!current) return window
+  return [current, ...window.slice(1)].sort((a, b) => compareChildSessions(a, b, rank))
+}
+
 // Newest child session id (the conveyor tail), ignoring non-child rows.
 export function newestChildSessionID(sessions: ChildSessionLike[], rank?: ChildRankLookup): string | undefined {
-  return childSessions(sessions, rank).at(-1)?.id
+  return childSessionWindow(sessions, rank).at(-1)?.id
 }
 
 // Circular step through child sessions in conveyor order. direction +1
@@ -42,7 +61,7 @@ export function cycleChildSessionID(
   direction: 1 | -1,
   rank?: ChildRankLookup,
 ): string | undefined {
-  const children = childSessions(sessions, rank)
+  const children = childSessionWindow(sessions, rank, currentID)
   if (children.length === 0) return undefined
   const current = children.findIndex((x) => x.id === currentID)
   if (current === -1) return children[direction === 1 ? 0 : children.length - 1].id

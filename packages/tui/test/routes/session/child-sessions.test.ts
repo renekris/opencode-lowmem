@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test"
 import {
+  childSessionWindow,
   compareChildSessions,
   cycleChildSessionID,
   newestChildSessionID,
   type ChildRankLookup,
 } from "../../../src/routes/session/child-sessions"
+import { describe } from "bun:test"
 
 const child = (id: string, created: number) => ({ id, parentID: "parent", time: { created } })
 const parent: { id: string; parentID?: string; time: { created: number } } = { id: "parent", time: { created: 0 } }
@@ -106,4 +108,58 @@ test("cycling over tie timestamps stays deterministic by descending id", () => {
 test("cycling with no children is a no-op", () => {
   expect(cycleChildSessionID([], "a", 1)).toBeUndefined()
   expect(cycleChildSessionID([], undefined, -1)).toBeUndefined()
+})
+
+describe("child conveyor window", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => child(`c${i + 1}`, i + 1))
+
+  test("keeps only the newest 50 children in conveyor order", () => {
+    const w = childSessionWindow(many(52))
+    expect(w.length).toBe(50)
+    expect(w[0]?.id).toBe("c3")
+    expect(w.at(-1)?.id).toBe("c52")
+  })
+
+  test("returns all children at or below the limit and excludes non-child rows", () => {
+    const w = childSessionWindow([parent, ...many(50)])
+    expect(w.length).toBe(50)
+    expect(w[0]?.id).toBe("c1")
+  })
+
+  test("pins a viewed out-of-window child by displacing the window oldest", () => {
+    const w = childSessionWindow(many(52), undefined, "c1")
+    expect(w.length).toBe(50)
+    expect(w.some((x) => x.id === "c1")).toBe(true)
+    expect(w.some((x) => x.id === "c3")).toBe(false)
+    expect(w.map((x) => parseInt(x.id.slice(1)))).toEqual([
+      1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+      33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
+    ])
+  })
+
+  test("cycling wraps at window edges, not the full family", () => {
+    const kids = many(52)
+    expect(cycleChildSessionID(kids, "c3", -1)).toBe("c52")
+    expect(cycleChildSessionID(kids, "c52", 1)).toBe("c3")
+  })
+
+  test("cycling from a pinned child moves within the pinned window", () => {
+    const kids = many(52)
+    expect(cycleChildSessionID(kids, "c1", 1, undefined)).toBe("c4")
+    expect(cycleChildSessionID(kids, "c1", -1, undefined)).toBe("c52")
+  })
+
+  test("a ranked old child re-enters at the tail and drops the window head", () => {
+    const rank = ranker({ c1: { at: 100, ordinal: 0 } })
+    const w = childSessionWindow(many(52), rank)
+    expect(w.at(-1)?.id).toBe("c1")
+    expect(w[0]?.id).toBe("c4")
+    expect(w.some((x) => x.id === "c2")).toBe(false)
+    expect(w.some((x) => x.id === "c3")).toBe(false)
+  })
+
+  test("newest child resolution respects the window", () => {
+    expect(newestChildSessionID(many(52))).toBe("c52")
+    expect(newestChildSessionID(many(52), ranker({ c1: { at: 100, ordinal: 0 } }))).toBe("c1")
+  })
 })
