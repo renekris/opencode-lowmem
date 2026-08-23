@@ -29,4 +29,13 @@ describe("part delta buffer", () => {
     buffer.flushNow()
     expect(buffer.pendingCount()).toBe(0)
   })
+
+  test("burst pushes join into a single linear apply", () => {
+    const applied: string[] = []
+    const buffer = createPartDeltaBuffer({ intervalMs: 10_000, apply: (e) => applied.push(e.accumulated) })
+    const expected = Array.from({ length: 1000 }, (_, i) => String.fromCharCode(97 + (i % 26))).join("")
+    for (const char of expected) buffer.push({ messageID: "m1", partID: "p1", field: "text", delta: char })
+    buffer.flushNow()
+    expect(applied).toEqual([expected])
+  })
 })

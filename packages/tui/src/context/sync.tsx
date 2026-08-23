@@ -205,7 +205,21 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    // Fork(lowmem): narrow the union payload without casting the event itself;
+    // late events for a deleted session must not resurrect its buckets.
+    const tombstoneSessionID = (properties: unknown): string | undefined => {
+      if (typeof properties !== "object" || properties === null) return undefined
+      const record = properties as Record<string, unknown>
+      if (typeof record.sessionID === "string") return record.sessionID
+      const info = record.info
+      if (typeof info === "object" && info !== null && typeof (info as Record<string, unknown>).id === "string") {
+        return (info as Record<string, unknown>).id as string
+      }
+      return undefined
+    }
     event.subscribe((event, { directory, workspace }) => {
+      const tombstoneID = tombstoneSessionID(event.properties)
+      if (tombstoneID !== undefined && payloadEviction.isDeleted(tombstoneID)) return
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
@@ -308,19 +322,15 @@ export const {
 
         case "session.deleted": {
           forgetInboundChild(event.properties.info.id)
-          // Fork(lowmem): drop payload buckets too, or deleted sessions leak
-          // in the store (upstream #12351).
-          for (const msg of store.message[event.properties.info.id] ?? []) {
-            partDeltaBuffer.dropMessage(msg.id)
+          // Fork(lowmem): full cleanup — payload and bookkeeping buckets die
+          // with the session, and the ID is tombstoned so late events and
+          // in-flight syncs cannot resurrect them (upstream #12351).
+          for (const msg of store.message[event.properties.info.id] ?? []) partDeltaBuffer.dropMessage(msg.id)
+          for (const [messageID, parts] of Object.entries(store.part)) {
+            if (parts.some((part) => part.sessionID === event.properties.info.id))
+              partDeltaBuffer.dropMessage(messageID)
           }
-          setStore(
-            produce((draft) => {
-              for (const msg of draft.message[event.properties.info.id] ?? []) delete draft.part[msg.id]
-              delete draft.message[event.properties.info.id]
-              delete draft.session_diff[event.properties.info.id]
-              delete draft.session_status[event.properties.info.id]
-            }),
-          )
+          payloadEviction.forgetSession(event.properties.info.id)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -433,6 +443,14 @@ export const {
         case "message.removed": {
           if (payloadEviction.isEvicted(event.properties.sessionID)) break
           touchMessage(event.properties.sessionID, event.properties.messageID)
+          // Fork(lowmem): the part bucket and pending deltas die with the
+          // message, or removal orphans them forever.
+          partDeltaBuffer.dropMessage(event.properties.messageID)
+          setStore(
+            produce((draft) => {
+              delete draft.part[event.properties.messageID]
+            }),
+          )
           const messages = store.message[event.properties.sessionID]
           if (!messages) break
           const index = messages.findIndex((message) => message.id === event.properties.messageID)
@@ -672,6 +690,9 @@ export const {
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string) {
+          // Fork(lowmem): deleted sessions stay deleted; viewed() would re-arm
+          // the recency clock for a session whose payloads must not return.
+          if (payloadEviction.isDeleted(sessionID)) return
           payloadEviction.viewed(sessionID)
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
@@ -685,6 +706,9 @@ export const {
               sdk.client.session.todo({ sessionID }),
               sdk.client.session.diff({ sessionID }),
             ])
+            // Fork(lowmem): the session may have been deleted while fetching;
+            // writing would resurrect its payloads.
+            if (payloadEviction.isDeleted(sessionID)) return
             setStore(
               produce((draft) => {
                 const match = search(draft.session, sessionID, (s) => s.id)
@@ -744,7 +768,9 @@ export const {
             hydratingSessions.delete(sessionID)
             // Fork(lowmem): re-arm after tracker cleanup (protection checks the
             // tracker maps), so a failed hydration gates late events again.
-            if (store.message[sessionID] === undefined) payloadEviction.remarkEvicted(sessionID)
+            if (!payloadEviction.isDeleted(sessionID) && store.message[sessionID] === undefined) {
+              payloadEviction.remarkEvicted(sessionID)
+            }
             payloadEviction.compact()
           })
           syncingSessions.set(sessionID, task)

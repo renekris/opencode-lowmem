@@ -568,7 +568,10 @@ const layer = Layer.effect(
                 Effect.gen(function* () {
                   output += chunk
                   if (part.state.status === "running") {
-                    part.state.metadata = { output }
+                    // Fork(lowmem): reassign, never mutate — updatePart publishes
+                    // shallow copies, so in-place state edits would retro-edit
+                    // already-queued message.part.updated snapshots.
+                    part.state = { ...part.state, metadata: { output } }
                     yield* sessions.updatePart(part)
                   }
                 }),

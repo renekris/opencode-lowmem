@@ -143,7 +143,10 @@ is fork-owned files):
 **Backlog** (unclaimed, no upstream equivalent): LSP files LRU
 (`packages/opencode/src/lsp/client.ts` store is set-never-deleted);
 BackgroundJob settled-entry eviction (`packages/core/src/background-job.ts`);
-per-session Effect EventTarget listener leak (upstream #29204, no fix PR);
+run-UI delta coalescing (`packages/opencode/src/cli/cmd/run/session-data.ts`
+still concatenates and flushes per delta — changing it means changing footer
+render cadence, so it needs its own behavior-preserving round); serve-mode SSE
+event queue is unbounded (`handlers/event.ts`) — backpressure policy needed;
 log rotation cap; `tool-output/` retention policy; `PRAGMA auto_vacuum`.
 
 ## Credit

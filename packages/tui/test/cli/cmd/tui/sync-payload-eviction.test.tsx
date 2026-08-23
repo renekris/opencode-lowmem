@@ -323,7 +323,7 @@ test("the activated route session survives child preview syncs", async () => {
   }
 })
 
-test("eviction reclaims part buckets orphaned by message removal", async () => {
+test("message removal drops its part bucket immediately", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const { app, emit, sync } = await mount(fetchFor(), tmp.path)
@@ -344,6 +344,7 @@ test("eviction reclaims part buckets orphaned by message removal", async () => {
         },
       }),
     )
+    await wait(() => sync.data.part[orphanMessage]?.length === 1)
     emit(
       global({
         id: "evt_msg_removed",
@@ -352,7 +353,7 @@ test("eviction reclaims part buckets orphaned by message removal", async () => {
       }),
     )
     await wait(() => sync.data.message[ids[0]]?.length === 0)
-    expect(sync.data.part[orphanMessage]).toHaveLength(1)
+    expect(sync.data.part[orphanMessage]).toBeUndefined()
 
     pushExtra(emit, "1")
     await wait(() => sync.data.message[ids[0]] === undefined)
@@ -459,14 +460,7 @@ test("streams deltas through the coalescing buffer", async () => {
         type: "message.updated",
         properties: {
           sessionID: sid,
-          info: {
-            id: mid,
-            sessionID: sid,
-            role: "assistant" as const,
-            agent: "build",
-            model: { providerID: "test", modelID: "test" },
-            time: { created: 1 },
-          },
+          info: { ...terminalMessage(sid, 0), id: mid, time: { created: 1 } },
         },
       }),
     )
@@ -517,12 +511,167 @@ test("session.deleted drops message and part buckets", async () => {
       global({
         id: "evt_gone_del",
         type: "session.deleted",
-        properties: { sessionID: sid, info: { id: sid } },
+        properties: { sessionID: sid, info: row(sid) },
       }),
     )
     await wait(() => sync.data.session.find((x) => x.id === sid) === undefined)
     expect(sync.data.message[sid]).toBeUndefined()
     expect(sync.data.part[mid]).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("session.deleted clears every bucket, orphans, and tombstones late events", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_tomb", 1)
+    const sid = ids[0]!
+    const mid = `msg_${sid}_0`
+    emit(
+      global({
+        id: "evt_tomb_part",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          time: 1,
+          part: { id: `part_${mid}`, messageID: mid, sessionID: sid, type: "text", text: "x" },
+        },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_orphan",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          time: 1,
+          part: { id: "part_tomb_orphan", messageID: "msg_tomb_orphan", sessionID: sid, type: "text", text: "y" },
+        },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_todo",
+        type: "todo.updated",
+        properties: { sessionID: sid, todos: [{ content: "t", status: "pending", priority: "medium" }] },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_status",
+        type: "session.status",
+        properties: { sessionID: sid, status: { type: "idle" } },
+      }),
+    )
+    emit(global({ id: "evt_tomb_diff", type: "session.diff", properties: { sessionID: sid, diff: [] } }))
+    emit(
+      global({
+        id: "evt_tomb_perm",
+        type: "permission.asked",
+        properties: { id: "perm_tomb", sessionID: sid, permission: "bash", patterns: [], metadata: {}, always: [] },
+      }),
+    )
+    emit(
+      global({ id: "evt_tomb_q", type: "question.asked", properties: { id: "q_tomb", sessionID: sid, questions: [] } }),
+    )
+    await wait(() => sync.data.part[mid]?.length === 1)
+    expect(sync.data.part["msg_tomb_orphan"]?.length).toBe(1)
+    expect(sync.data.todo[sid]?.length).toBe(1)
+    expect(sync.data.session_status[sid]).toBeDefined()
+    expect(sync.data.session_diff[sid]).toBeDefined()
+    expect(sync.data.permission[sid]?.length).toBe(1)
+    expect(sync.data.question[sid]?.length).toBe(1)
+
+    emit(global({ id: "evt_tomb_del", type: "session.deleted", properties: { sessionID: sid, info: row(sid) } }))
+    await wait(() => sync.data.session.find((x) => x.id === sid) === undefined)
+    expect(sync.data.message[sid]).toBeUndefined()
+    expect(sync.data.part[mid]).toBeUndefined()
+    expect(sync.data.part["msg_tomb_orphan"]).toBeUndefined()
+    expect(sync.data.todo[sid]).toBeUndefined()
+    expect(sync.data.session_status[sid]).toBeUndefined()
+    expect(sync.data.session_diff[sid]).toBeUndefined()
+    expect(sync.data.permission[sid]).toBeUndefined()
+    expect(sync.data.question[sid]).toBeUndefined()
+
+    emit(
+      global({
+        id: "evt_tomb_late_msg",
+        type: "message.updated",
+        properties: { sessionID: sid, info: terminalMessage(sid, 5) },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_late_part",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          time: 6,
+          part: { id: "part_tomb_late", messageID: mid, sessionID: sid, type: "text", text: "z" },
+        },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_late_todo",
+        type: "todo.updated",
+        properties: { sessionID: sid, todos: [{ content: "t", status: "pending", priority: "medium" }] },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_tomb_late_status",
+        type: "session.status",
+        properties: { sessionID: sid, status: { type: "idle" } },
+      }),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(sync.data.message[sid]).toBeUndefined()
+    expect(sync.data.part[mid]).toBeUndefined()
+    expect(sync.data.todo[sid]).toBeUndefined()
+    expect(sync.data.session_status[sid]).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("message.removed drops the part bucket and pending deltas", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_rm", 1)
+    const sid = ids[0]!
+    const mid = `msg_${sid}_0`
+    emit(
+      global({
+        id: "evt_rm_part",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          time: 1,
+          part: { id: `part_${mid}`, messageID: mid, sessionID: sid, type: "text", text: "" },
+        },
+      }),
+    )
+    await wait(() => sync.data.part[mid]?.length === 1)
+    emit(
+      global({
+        id: "evt_rm_delta",
+        type: "message.part.delta",
+        properties: { sessionID: sid, messageID: mid, partID: `part_${mid}`, field: "text", delta: "pending" },
+      }),
+    )
+    emit(global({ id: "evt_rm_msg", type: "message.removed", properties: { sessionID: sid, messageID: mid } }))
+    await wait(() => sync.data.part[mid] === undefined)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(sync.data.part[mid]).toBeUndefined()
+    expect(sync.data.message[sid]?.some((m) => m.id === mid)).toBe(false)
   } finally {
     app.renderer.destroy()
   }

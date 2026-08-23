@@ -255,8 +255,12 @@ const layer = Layer.effect(
         const unsubscribe = yield* events.listen((event) => {
           if (event.location?.directory !== ctx.directory) return Effect.void
           return Effect.sync(() => {
+            // Fork(lowmem): plugins get an isolated copy — plugin code must not
+            // be able to mutate shared event payloads (heavy string fields are
+            // shared by structuredClone, so this stays cheap).
+            const properties = structuredClone(event.data) as any
             for (const hook of hooks) {
-              void hook["event"]?.({ event: { id: event.id, type: event.type, properties: event.data } as any })
+              void hook["event"]?.({ event: { id: event.id, type: event.type, properties } as any })
             }
           })
         })

@@ -113,5 +113,43 @@ export function createPayloadEviction<T extends EvictableStore>(
     evictSessionPayload(sessionID)
   }
 
-  return { activate, viewed, isEvicted, compact, remarkEvicted }
+  const deleted = new Set<string>()
+  const deletionOrder: string[] = []
+  const DELETED_TOMBSTONE_LIMIT = 1024
+
+  function isDeleted(sessionID: string) {
+    return deleted.has(sessionID)
+  }
+
+  // Fork(lowmem): full cleanup on upstream session.deleted. Unlike eviction,
+  // permission/question buckets die too, bookkeeping is dropped, and the ID is
+  // tombstoned so in-flight syncs and late events cannot resurrect payloads.
+  function forgetSession(sessionID: string) {
+    if (!deleted.has(sessionID)) {
+      deleted.add(sessionID)
+      deletionOrder.push(sessionID)
+      if (deletionOrder.length > DELETED_TOMBSTONE_LIMIT) deleted.delete(deletionOrder.shift()!)
+    }
+    evicted.delete(sessionID)
+    const previous = viewClock.lastIndexOf(sessionID)
+    if (previous !== -1) viewClock.splice(previous, 1)
+    deps.fullSyncedSessions.delete(sessionID)
+    const orphaned = Object.entries(store.part)
+      .filter(([, parts]) => parts.some((part) => part.sessionID === sessionID))
+      .map(([messageID]) => messageID)
+    setStore(
+      produce((draft: T) => {
+        for (const message of store.message[sessionID] ?? []) delete draft.part[message.id]
+        for (const messageID of orphaned) delete draft.part[messageID]
+        delete draft.message[sessionID]
+        delete draft.todo[sessionID]
+        delete draft.session_diff[sessionID]
+        delete draft.session_status[sessionID]
+        delete draft.permission[sessionID]
+        delete draft.question[sessionID]
+      }),
+    )
+  }
+
+  return { activate, viewed, isEvicted, compact, remarkEvicted, forgetSession, isDeleted }
 }
