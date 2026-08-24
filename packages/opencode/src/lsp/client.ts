@@ -4,11 +4,12 @@ import { createMessageConnection, StreamMessageReader, StreamMessageWriter } fro
 import type { Diagnostic as VSCodeDiagnostic } from "vscode-languageserver-types"
 import { Process } from "@/util/process"
 import { LANGUAGE_EXTENSIONS } from "./language"
-import { Effect, Schema } from "effect"
+import { Schema } from "effect"
 import type * as LSPServer from "./server"
 import { withTimeout } from "../util/timeout"
 import { Filesystem } from "@/util/filesystem"
 import type { InstanceContext } from "@/project/instance-context"
+import { DocumentStore } from "./document-store"
 
 const DIAGNOSTICS_DEBOUNCE_MS = 150
 const DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS = 5_000
@@ -17,9 +18,6 @@ const DIAGNOSTICS_REQUEST_TIMEOUT_MS = 3_000
 
 const INITIALIZE_TIMEOUT_MS = 45_000
 
-// LSP spec constants
-const FILE_CHANGE_CREATED = 1
-const FILE_CHANGE_CHANGED = 2
 const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2
 
 export type Info = NonNullable<Awaited<ReturnType<typeof create>>>
@@ -120,15 +118,19 @@ function shouldSeedDiagnosticsOnFirstPush(serverID: string) {
   return serverID === "typescript"
 }
 
+function assertNever(value: never): never {
+  throw new Error(`Unexpected LSP document event: ${JSON.stringify(value)}`)
+}
+
 export async function create(input: {
   serverID: string
   server: LSPServer.Handle
   root: string
   directory: string
   instance: InstanceContext
+  readFile?: (path: string) => Promise<string>
 }) {
-  const instance = input.instance
-
+  const readFile = input.readFile ?? Filesystem.readText
   const connection = createMessageConnection(
     new StreamMessageReader(input.server.process.stdout as any),
     new StreamMessageWriter(input.server.process.stdin as any),
@@ -142,13 +144,30 @@ export async function create(input: {
   const diagnosticRegistrations = new Map<string, CapabilityRegistration>()
   const registrationListeners = new Set<() => void>()
   const diagnosticListeners = new Set<(input: { path: string; serverID: string }) => void>()
+  const documentGenerationListeners = new Set<() => void>()
+  const closedDocuments = new Set<string>()
+  const documents = DocumentStore.create()
+  documents.onEvict(async ({ path: documentPath }) => {
+    await connection.sendNotification("textDocument/didClose", {
+      textDocument: {
+        uri: pathToFileURL(documentPath).href,
+      },
+    })
+    pushDiagnostics.delete(documentPath)
+    pullDiagnostics.delete(documentPath)
+    published.delete(documentPath)
+    closedDocuments.add(documentPath)
+    for (const listener of [...documentGenerationListeners]) listener()
+  })
   const mergedDiagnostics = (filePath: string) =>
     dedupeDiagnostics([...(pushDiagnostics.get(filePath) ?? []), ...(pullDiagnostics.get(filePath) ?? [])])
   const updatePushDiagnostics = (filePath: string, next: Diagnostic[]) => {
+    if (!documents.has(filePath)) return
     pushDiagnostics.set(filePath, next)
     for (const listener of diagnosticListeners) listener({ path: filePath, serverID: input.serverID })
   }
   const updatePullDiagnostics = (filePath: string, next: Diagnostic[]) => {
+    if (closedDocuments.has(filePath)) return
     pullDiagnostics.set(filePath, next)
   }
   const emitRegistrationChange = () => {
@@ -160,6 +179,7 @@ export async function create(input: {
   connection.onNotification("textDocument/publishDiagnostics", (params) => {
     const filePath = getFilePath(params.uri)
     if (!filePath) return
+    if (!documents.has(filePath)) return
     published.set(filePath, {
       at: Date.now(),
       version: typeof params.version === "number" ? params.version : undefined,
@@ -170,7 +190,7 @@ export async function create(input: {
     }
     updatePushDiagnostics(filePath, params.diagnostics)
   })
-  connection.onRequest("window/workDoneProgress/create", (params) => {
+  connection.onRequest("window/workDoneProgress/create", () => {
     return null
   })
   connection.onRequest("workspace/configuration", async (params) => {
@@ -265,8 +285,6 @@ export async function create(input: {
     })
   }
 
-  const files: Record<string, { version: number; text: string }> = {}
-
   // --- Diagnostic helpers ---
 
   const mergeResults = (filePath: string, results: DiagnosticRequestResult[]) => {
@@ -284,6 +302,7 @@ export async function create(input: {
 
     if (matched && !merged.has(filePath)) merged.set(filePath, [])
     for (const [target, items] of merged.entries()) {
+      if (closedDocuments.has(target)) continue
       updatePullDiagnostics(target, dedupeDiagnostics(items))
     }
 
@@ -468,15 +487,22 @@ export async function create(input: {
       let debounceTimer: ReturnType<typeof setTimeout> | undefined
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined
       let unsub: (() => void) | undefined
+      let generationUnsub: (() => void) | undefined
+      const generation = documents.generation
       const finish = (result: boolean) => {
         if (finished) return
         finished = true
         if (debounceTimer) clearTimeout(debounceTimer)
         if (timeoutTimer) clearTimeout(timeoutTimer)
         unsub?.()
+        generationUnsub?.()
         resolve(result)
       }
       const schedule = () => {
+        if (documents.generation !== generation) {
+          finish(false)
+          return
+        }
         const hit = published.get(request.path)
         if (!hit) return
         if (typeof hit.version === "number" && hit.version !== request.version) return
@@ -492,6 +518,9 @@ export async function create(input: {
       }
       diagnosticListeners.add(listener)
       unsub = () => diagnosticListeners.delete(listener)
+      const generationListener = () => finish(false)
+      documentGenerationListeners.add(generationListener)
+      generationUnsub = () => documentGenerationListeners.delete(generationListener)
       schedule()
     })
   }
@@ -552,72 +581,55 @@ export async function create(input: {
     },
     notify: {
       async open(request: { path: string }) {
-        request.path = Filesystem.normalizePath(
+        const normalizedPath = Filesystem.normalizePath(
           path.isAbsolute(request.path) ? request.path : path.resolve(input.directory, request.path),
         )
-        const text = await Filesystem.readText(request.path)
-        const extension = path.extname(request.path)
+        const extension = path.extname(normalizedPath)
         const languageId = LANGUAGE_EXTENSIONS[extension] ?? "plaintext"
-
-        const document = files[request.path]
-        if (document !== undefined) {
-          // Do not wipe diagnostics on didChange. Some servers (e.g. clangd) only
-          // re-emit diagnostics when the content actually changes, so clearing
-          // here would lose errors for no-op touchFile calls. Let the server's
-          // next push/pull overwrite naturally.
-          await connection.sendNotification("workspace/didChangeWatchedFiles", {
-            changes: [
-              {
-                uri: pathToFileURL(request.path).href,
-                type: FILE_CHANGE_CHANGED,
-              },
-            ],
-          })
-
-          const next = document.version + 1
-          files[request.path] = { version: next, text }
-          await connection.sendNotification("textDocument/didChange", {
-            textDocument: {
-              uri: pathToFileURL(request.path).href,
-              version: next,
-            },
-            contentChanges:
-              syncKind === TEXT_DOCUMENT_SYNC_INCREMENTAL
-                ? [
-                    {
-                      range: {
-                        start: { line: 0, character: 0 },
-                        end: endPosition(document.text),
-                      },
-                      text,
-                    },
-                  ]
-                : [{ text }],
-          })
-          return next
-        }
-
-        await connection.sendNotification("workspace/didChangeWatchedFiles", {
-          changes: [
-            {
-              uri: pathToFileURL(request.path).href,
-              type: FILE_CHANGE_CREATED,
-            },
-          ],
+        const document = await documents.open(normalizedPath, () => readFile(normalizedPath), async (event) => {
+          switch (event.kind) {
+            case "change":
+              // Do not wipe diagnostics on didChange. Some servers (e.g. clangd) only
+              // re-emit diagnostics when the content actually changes, so clearing
+              // here would lose errors for no-op touchFile calls. Let the server's
+              // next push/pull overwrite naturally.
+              await connection.sendNotification("textDocument/didChange", {
+                textDocument: {
+                  uri: pathToFileURL(normalizedPath).href,
+                  version: event.document.version,
+                },
+                contentChanges:
+                  syncKind === TEXT_DOCUMENT_SYNC_INCREMENTAL
+                    ? [
+                        {
+                          range: {
+                            start: { line: 0, character: 0 },
+                            end: endPosition(event.previous.text),
+                          },
+                          text: event.text,
+                        },
+                      ]
+                    : [{ text: event.text }],
+              })
+              return
+            case "open":
+              closedDocuments.delete(normalizedPath)
+              pushDiagnostics.delete(normalizedPath)
+              pullDiagnostics.delete(normalizedPath)
+              await connection.sendNotification("textDocument/didOpen", {
+                textDocument: {
+                  uri: pathToFileURL(normalizedPath).href,
+                  languageId,
+                  version: event.document.version,
+                  text: event.text,
+                },
+              })
+              return
+            default:
+              return assertNever(event)
+          }
         })
-
-        pushDiagnostics.delete(request.path)
-        pullDiagnostics.delete(request.path)
-        await connection.sendNotification("textDocument/didOpen", {
-          textDocument: {
-            uri: pathToFileURL(request.path).href,
-            languageId,
-            version: 0,
-            text,
-          },
-        })
-        files[request.path] = { version: 0, text }
-        return 0
+        return document.version
       },
     },
     get diagnostics() {
@@ -631,6 +643,7 @@ export async function create(input: {
       const normalizedPath = Filesystem.normalizePath(
         path.isAbsolute(request.path) ? request.path : path.resolve(input.directory, request.path),
       )
+      if (!documents.has(normalizedPath)) return
       if (request.mode === "document") {
         await waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
         return
@@ -638,6 +651,7 @@ export async function create(input: {
       await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
     },
     async shutdown() {
+      await documents.closeAll()
       connection.end()
       connection.dispose()
       await Process.stop(input.server.process)
