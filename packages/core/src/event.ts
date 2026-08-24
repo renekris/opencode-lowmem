@@ -18,6 +18,24 @@ export type { Data, Definition, Payload } from "@opencode-ai/schema/event"
 export type Subscriber<D extends Definition = Definition> = (event: Payload<D>) => Effect.Effect<void>
 export type Unsubscribe = Effect.Effect<void>
 
+export type Codec = {
+  readonly encode: (input: unknown) => unknown
+  readonly decode: (input: unknown) => unknown
+}
+
+export const codecCache = new WeakMap<Definition, Codec>()
+
+const getCodec = (definition: Definition): Codec => {
+  const cached = codecCache.get(definition)
+  if (cached) return cached
+  const codec = {
+    encode: Schema.encodeUnknownSync(definition.data),
+    decode: Schema.decodeUnknownSync(definition.data),
+  }
+  codecCache.set(definition, codec)
+  return codec
+}
+
 export const latestSequence = Effect.fn("EventV2.latestSequence")(function* (
   db: Database.Interface["db"],
   aggregateID: string,
@@ -56,7 +74,7 @@ const decodeSerializedEvent = (event: SerializedEvent): Payload => {
     id: event.id,
     type: definition.type,
     durable: { aggregateID: event.aggregateID, seq: event.seq, version: definition.durable.version },
-    data: Schema.decodeUnknownSync(definition.data)(event.data),
+    data: getCodec(definition).decode(event.data),
   }
 }
 
@@ -238,10 +256,7 @@ export const layerWith = (options?: LayerOptions) =>
                             .get()
                             .pipe(Effect.orDie)
                           const latest = row?.seq ?? -1
-                          const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<
-                            string,
-                            unknown
-                          >
+                          const encoded = getCodec(definition).encode(event.data) as Record<string, unknown>
                           if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                             yield* Effect.die(
                               new InvalidDurableEventError({
@@ -443,7 +458,7 @@ export const layerWith = (options?: LayerOptions) =>
             const payload = {
               id: event.id,
               type: definition.type,
-              data: Schema.decodeUnknownSync(definition.data)(event.data),
+              data: getCodec(definition).decode(event.data),
             } as Payload
             const committed = yield* commitDurableEvent(definition, payload, {
               seq: event.seq,

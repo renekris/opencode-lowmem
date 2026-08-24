@@ -421,6 +421,33 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("reuses durable codecs without changing round-trip values", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const aggregateID = Session.ID.create()
+      EventV2.codecCache.delete(DurableMessage)
+
+      yield* events.publish(DurableMessage, durableData(aggregateID, "first"))
+      const encodeCodec = EventV2.codecCache.get(DurableMessage)
+      yield* events.publish(DurableMessage, durableData(aggregateID, "second"))
+
+      expect(encodeCodec).toBeDefined()
+      expect(EventV2.codecCache.get(DurableMessage)).toBe(encodeCodec)
+
+      EventV2.codecCache.delete(DurableMessage)
+      const decoded = yield* events.durable({ aggregateID }).pipe(Stream.take(2), Stream.runCollect)
+      const decodeCodec = EventV2.codecCache.get(DurableMessage)
+
+      expect(decodeCodec).toBeDefined()
+      expect(decodeCodec).not.toBe(encodeCodec)
+      expect(Array.from(decoded).map((event) => event.data)).toEqual([
+        durableData(aggregateID, "first"),
+        durableData(aggregateID, "second"),
+      ])
+      expect(EventV2.codecCache.get(DurableMessage)).toBe(decodeCodec)
+    }),
+  )
+
   it.effect("increments durable event seq per aggregate", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
