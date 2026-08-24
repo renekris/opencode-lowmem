@@ -1,8 +1,8 @@
 import { produce, type SetStoreFunction } from "solid-js/store"
+import { createPayloadBudget } from "./payload-budget"
 
 type Message = { id: string; role: string; time: { created?: number; completed?: number } }
 type SessionRow = { id: string; time: { compacting?: number } }
-type SessionStatus = { type: string }
 type Part = { id: string; sessionID: string }
 
 type EvictableStore = {
@@ -10,34 +10,37 @@ type EvictableStore = {
   part: Record<string, Part[]>
   todo: Record<string, unknown[]>
   session_diff: Record<string, unknown[]>
-  session_status: Record<string, SessionStatus>
+  session_status: Record<string, { type: string }>
   permission: Record<string, unknown[]>
   question: Record<string, unknown[]>
   session: SessionRow[]
 }
 
 type EvictionDeps = {
-  fullSyncedSessions: Set<string>
-  syncingSessions: Map<string, unknown>
-  hydratingSessions: Map<string, unknown>
+  readonly fullSyncedSessions: Set<string>
+  readonly syncingSessions: Map<string, unknown>
+  readonly hydratingSessions: Map<string, unknown>
 }
 
-// Fork(lowmem): TUI payload eviction. Session rows, statuses, permissions and
-// questions stay complete; heavy message/part/todo/diff payloads for sessions
-// viewed out are dropped and re-hydrate via session.sync() on re-entry.
-const VIEWED_PAYLOAD_LIMIT = 20
-
-export function createPayloadEviction<T extends EvictableStore>(
-  store: EvictableStore,
-  setStore: SetStoreFunction<T>,
-  deps: EvictionDeps,
-) {
+export function createPayloadEviction<T extends EvictableStore>(store: T, setStore: SetStoreFunction<T>, deps: EvictionDeps) {
   const evicted = new Set<string>()
+  const deleted = new Set<string>()
+  const deletionOrder: string[] = []
   const viewClock: string[] = []
+  const evictingSessions = new Set<string>()
+  const DELETED_TOMBSTONE_LIMIT = 1024
   let active: string | undefined
+  let dropMessage: (messageID: string) => void = () => {}
 
-  // Hydration observation: records recency only. Route activation is separate
-  // so child-preview syncs cannot steal protection from the displayed route.
+  const budget = createPayloadBudget({
+    isActive: (sessionID) => sessionID === active,
+    isProtected: (sessionID) =>
+      sessionID === active ||
+      deps.syncingSessions.has(sessionID) ||
+      deps.hydratingSessions.has(sessionID) ||
+      evictingSessions.has(sessionID),
+  })
+
   function viewed(sessionID: string) {
     evicted.delete(sessionID)
     const previous = viewClock.lastIndexOf(sessionID)
@@ -48,36 +51,25 @@ export function createPayloadEviction<T extends EvictableStore>(
   function activate(sessionID: string) {
     active = sessionID
     viewed(sessionID)
+    budget.refresh()
+    compact()
   }
 
   function isEvicted(sessionID: string) {
     return evicted.has(sessionID)
   }
 
-  function protectedFromEviction(sessionID: string): boolean {
-    if (sessionID === active) return true
-    if (deps.syncingSessions.has(sessionID) || deps.hydratingSessions.has(sessionID)) return true
-    const status = store.session_status[sessionID]
-    if (status !== undefined && status.type !== "idle") return true
-    if ((store.permission[sessionID] ?? []).length > 0) return true
-    if ((store.question[sessionID] ?? []).length > 0) return true
-    if (store.session.find((item) => item.id === sessionID)?.time.compacting) return true
-    const messages = store.message[sessionID] ?? []
-    const last = messages.at(-1)
-    if (last && (last.role === "user" || !last.time.completed)) return true
-    return false
-  }
-
   function evictSessionPayload(sessionID: string) {
     evicted.add(sessionID)
-    // Sweep part buckets by sessionID: message.removed can orphan a bucket
-    // from the message list, so message-derived keys alone would leak it.
+    const messages = store.message[sessionID] ?? []
     const orphaned = Object.entries(store.part)
       .filter(([, parts]) => parts.some((part) => part.sessionID === sessionID))
       .map(([messageID]) => messageID)
+    for (const messageID of budget.messageIDs(sessionID)) dropMessage(messageID)
+    budget.removeSession(sessionID, { evicted: true })
     setStore(
       produce((draft: T) => {
-        for (const message of store.message[sessionID] ?? []) delete draft.part[message.id]
+        for (const message of messages) delete draft.part[message.id]
         for (const messageID of orphaned) delete draft.part[messageID]
         delete draft.message[sessionID]
         delete draft.todo[sessionID]
@@ -87,59 +79,64 @@ export function createPayloadEviction<T extends EvictableStore>(
     deps.fullSyncedSessions.delete(sessionID)
   }
 
-  // Scan every candidate: protected oldest entries must not stop the scan,
-  // otherwise enough protected sessions disables eviction entirely.
+  function protectedFromEviction(sessionID: string) {
+    return (
+      sessionID === active ||
+      deps.syncingSessions.has(sessionID) ||
+      deps.hydratingSessions.has(sessionID) ||
+      evictingSessions.has(sessionID)
+    )
+  }
+
   function compact() {
-    const payloadSessions = Object.keys(store.message)
-    const excess = payloadSessions.length - VIEWED_PAYLOAD_LIMIT
-    if (excess <= 0) return
-    const ranked = payloadSessions
+    budget.refresh()
+    if (!budget.overLimit()) return
+    const ranked = budget
+      .sessionIDs()
       .filter((sessionID) => !evicted.has(sessionID))
       .map((sessionID) => ({ sessionID, rank: viewClock.lastIndexOf(sessionID) }))
       .sort((a, b) => a.rank - b.rank)
-    let removed = 0
     for (const candidate of ranked) {
-      if (removed >= excess) break
+      if (!budget.overLimit()) return
       if (protectedFromEviction(candidate.sessionID)) continue
+      budget.warnPressure(candidate.sessionID)
+      evictingSessions.add(candidate.sessionID)
       evictSessionPayload(candidate.sessionID)
-      removed++
+      evictingSessions.delete(candidate.sessionID)
     }
+    budget.warnPressure(active ?? ranked[0]?.sessionID ?? "unknown")
   }
 
-  // Failure-path re-arm: a hydration that rejected after clearing the
-  // evicted flag must gate again, but never for protected sessions.
   function remarkEvicted(sessionID: string) {
     if (protectedFromEviction(sessionID)) return
     evictSessionPayload(sessionID)
   }
 
-  const deleted = new Set<string>()
-  const deletionOrder: string[] = []
-  const DELETED_TOMBSTONE_LIMIT = 1024
-
   function isDeleted(sessionID: string) {
     return deleted.has(sessionID)
   }
 
-  // Fork(lowmem): full cleanup on upstream session.deleted. Unlike eviction,
-  // permission/question buckets die too, bookkeeping is dropped, and the ID is
-  // tombstoned so in-flight syncs and late events cannot resurrect payloads.
   function forgetSession(sessionID: string) {
     if (!deleted.has(sessionID)) {
       deleted.add(sessionID)
       deletionOrder.push(sessionID)
-      if (deletionOrder.length > DELETED_TOMBSTONE_LIMIT) deleted.delete(deletionOrder.shift()!)
+      if (deletionOrder.length > DELETED_TOMBSTONE_LIMIT) {
+        const oldest = deletionOrder.shift()
+        if (oldest !== undefined) deleted.delete(oldest)
+      }
     }
     evicted.delete(sessionID)
     const previous = viewClock.lastIndexOf(sessionID)
     if (previous !== -1) viewClock.splice(previous, 1)
-    deps.fullSyncedSessions.delete(sessionID)
+    const messages = store.message[sessionID] ?? []
     const orphaned = Object.entries(store.part)
       .filter(([, parts]) => parts.some((part) => part.sessionID === sessionID))
       .map(([messageID]) => messageID)
+    for (const messageID of budget.messageIDs(sessionID)) dropMessage(messageID)
+    budget.removeSession(sessionID)
     setStore(
       produce((draft: T) => {
-        for (const message of store.message[sessionID] ?? []) delete draft.part[message.id]
+        for (const message of messages) delete draft.part[message.id]
         for (const messageID of orphaned) delete draft.part[messageID]
         delete draft.message[sessionID]
         delete draft.todo[sessionID]
@@ -149,7 +146,20 @@ export function createPayloadEviction<T extends EvictableStore>(
         delete draft.question[sessionID]
       }),
     )
+    deps.fullSyncedSessions.delete(sessionID)
   }
 
-  return { activate, viewed, isEvicted, compact, remarkEvicted, forgetSession, isDeleted }
+  return {
+    budget,
+    activate,
+    viewed,
+    isEvicted,
+    compact,
+    remarkEvicted,
+    forgetSession,
+    isDeleted,
+    setDropMessage(value: (messageID: string) => void) {
+      dropMessage = value
+    },
+  }
 }

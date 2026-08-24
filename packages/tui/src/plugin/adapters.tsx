@@ -96,14 +96,6 @@ function mapOptionCb<Value>(cb?: (item: TuiDialogSelectOption<Value>) => void) {
 }
 
 export function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
-  // Fork(lowmem): legacy payload getters must not observe eviction as empty
-  // data — a missing bucket for an evicted session triggers a deduplicated
-  // refetch; ensure() remains the explicit awaitable variant.
-  const revive = (sessionID: string, present: boolean) => {
-    if (present) return
-    if (!sync.session.isEvicted(sessionID)) return
-    void sync.session.sync(sessionID).catch(() => {})
-  }
   return {
     get ready() {
       return sync.ready
@@ -133,17 +125,14 @@ export function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"
       },
       diff(sessionID) {
         const value = sync.data.session_diff[sessionID]
-        revive(sessionID, value !== undefined)
         return (value ?? []).flatMap((item) => (item.file === undefined ? [] : [{ ...item, file: item.file }]))
       },
       todo(sessionID) {
         const value = sync.data.todo[sessionID]
-        revive(sessionID, value !== undefined)
         return value ?? []
       },
       messages(sessionID) {
         const value = sync.data.message[sessionID]
-        revive(sessionID, value !== undefined)
         return value ?? []
       },
       // Fork(lowmem): explicit opt-in rehydration for non-route sessions —

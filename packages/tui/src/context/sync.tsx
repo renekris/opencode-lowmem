@@ -35,6 +35,11 @@ import { usePermission } from "./permission"
 import { createPayloadEviction } from "./payload-eviction"
 import { forgetInboundChild, noteInboundMessage } from "../routes/session/child-inbound"
 import { createPartDeltaBuffer } from "./part-delta-buffer"
+import { isRecord } from "../util/record"
+
+type PermissionRequestWithToolInput = PermissionRequest & {
+  toolInput?: Record<string, unknown>
+}
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -160,19 +165,19 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
-    // Fork(lowmem): all payload-eviction logic lives in ./payload-eviction.
     const payloadEviction = createPayloadEviction(store, setStore, {
       fullSyncedSessions,
       syncingSessions,
       hydratingSessions,
     })
-    // Fork(lowmem): coalesce message.part.delta writes (see part-delta-buffer).
+    const payloadBudget = payloadEviction.budget
     const partDeltaBuffer = createPartDeltaBuffer({
       apply: ({ messageID, partID, field, accumulated }) => {
         const parts = store.part[messageID]
         if (!parts) return
         const result = search(parts, partID, (part) => part.id)
         if (!result.found) return
+        if (payloadBudget.isTruncated(messageID, partID)) return
         setStore(
           "part",
           messageID,
@@ -183,11 +188,16 @@ export const {
             ;(part[partField] as string) = (current ?? "") + accumulated
           }),
         )
+        const updated = store.part[messageID]?.[result.index]
+        if (!updated) return
+        const prepared = payloadBudget.preparePart(updated.sessionID, updated)
+        if (prepared !== updated) setStore("part", messageID, result.index, prepared)
+        payloadBudget.replacePart(messageID, prepared.id, prepared.sessionID, prepared)
+        payloadEviction.compact()
       },
+      onPendingBytes: payloadBudget.replacePendingDelta,
     })
-    // Fork(lowmem): assigned once `result` exists; declared here so the event
-    // handler can revive an evicted session that becomes active again.
-    let requestRevival: (sessionID: string) => void = () => {}
+    payloadEviction.setDropMessage(partDeltaBuffer.dropMessage)
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -208,13 +218,11 @@ export const {
     // Fork(lowmem): narrow the union payload without casting the event itself;
     // late events for a deleted session must not resurrect its buckets.
     const tombstoneSessionID = (properties: unknown): string | undefined => {
-      if (typeof properties !== "object" || properties === null) return undefined
-      const record = properties as Record<string, unknown>
+      if (!isRecord(properties)) return undefined
+      const record = properties
       if (typeof record.sessionID === "string") return record.sessionID
       const info = record.info
-      if (typeof info === "object" && info !== null && typeof (info as Record<string, unknown>).id === "string") {
-        return (info as Record<string, unknown>).id as string
-      }
+      if (isRecord(info) && typeof info.id === "string") return info.id
       return undefined
     }
     event.subscribe((event, { directory, workspace }) => {
@@ -225,6 +233,7 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
+          payloadBudget.clearPermissionRequest(event.properties.sessionID, event.properties.requestID)
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -241,7 +250,15 @@ export const {
         }
 
         case "permission.asked": {
-          const request = event.properties
+          const request: PermissionRequestWithToolInput = event.properties
+          if (request.tool !== undefined && request.toolInput !== undefined)
+            payloadBudget.setPermissionInput(
+              request.sessionID,
+              request.id,
+              request.tool.messageID,
+              request.tool.callID,
+              request.toolInput,
+            )
           if (permission.mode === "auto") {
             void sdk.client.permission.reply({
               requestID: request.id,
@@ -313,11 +330,15 @@ export const {
         case "todo.updated":
           if (payloadEviction.isEvicted(event.properties.sessionID)) break
           setStore("todo", event.properties.sessionID, event.properties.todos)
+          payloadBudget.replaceTodo(event.properties.sessionID, event.properties.todos)
+          payloadEviction.compact()
           break
 
         case "session.diff":
           if (payloadEviction.isEvicted(event.properties.sessionID)) break
           setStore("session_diff", event.properties.sessionID, event.properties.diff)
+          payloadBudget.replaceDiff(event.properties.sessionID, event.properties.diff)
+          payloadEviction.compact()
           break
 
         case "session.deleted": {
@@ -325,11 +346,6 @@ export const {
           // Fork(lowmem): full cleanup — payload and bookkeeping buckets die
           // with the session, and the ID is tombstoned so late events and
           // in-flight syncs cannot resurrect them (upstream #12351).
-          for (const msg of store.message[event.properties.info.id] ?? []) partDeltaBuffer.dropMessage(msg.id)
-          for (const [messageID, parts] of Object.entries(store.part)) {
-            if (parts.some((part) => part.sessionID === event.properties.info.id))
-              partDeltaBuffer.dropMessage(messageID)
-          }
           payloadEviction.forgetSession(event.properties.info.id)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
@@ -392,22 +408,20 @@ export const {
             noteInboundMessage(event.properties.info)
           }
           if (payloadEviction.isEvicted(event.properties.info.sessionID)) {
-            // Activity on an evicted session revives it: hydration re-fetches
-            // authoritative state including this message.
-            const info = event.properties.info
-            if (info.role === "user" || info.time.completed === undefined) requestRevival(info.sessionID)
             break
           }
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
+            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
             payloadEviction.compact()
             break
           }
           const result = search(messages, messageKey(event.properties.info), messageKey)
           if (result.found) {
             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
+            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
             payloadEviction.compact()
             break
           }
@@ -418,9 +432,13 @@ export const {
               draft.splice(result.index, 0, event.properties.info)
             }),
           )
+          payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
           const updated = store.message[event.properties.info.sessionID]
           if (updated.length > 100) {
             const oldest = updated[0]
+            partDeltaBuffer.dropMessage(oldest.id)
+            payloadBudget.removeMessage(event.properties.info.sessionID, oldest.id)
+            payloadBudget.removeParts(oldest.id)
             batch(() => {
               setStore(
                 "message",
@@ -446,6 +464,8 @@ export const {
           // Fork(lowmem): the part bucket and pending deltas die with the
           // message, or removal orphans them forever.
           partDeltaBuffer.dropMessage(event.properties.messageID)
+          payloadBudget.removeMessage(event.properties.sessionID, event.properties.messageID)
+          payloadBudget.removeParts(event.properties.messageID)
           setStore(
             produce((draft) => {
               delete draft.part[event.properties.messageID]
@@ -469,23 +489,30 @@ export const {
           if (payloadEviction.isEvicted(event.properties.part.sessionID)) break
           partDeltaBuffer.dropMessage(event.properties.part.messageID)
           touchPart(event.properties.part.sessionID, event.properties.part.id)
+          const part = payloadBudget.preparePart(event.properties.part.sessionID, event.properties.part)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
-            setStore("part", event.properties.part.messageID, [event.properties.part])
+            setStore("part", event.properties.part.messageID, [part])
+            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+            payloadEviction.compact()
             break
           }
           const result = search(parts, event.properties.part.id, (part) => part.id)
           if (result.found) {
-            setStore("part", event.properties.part.messageID, result.index, reconcile(event.properties.part))
+            setStore("part", event.properties.part.messageID, result.index, reconcile(part))
+            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+            payloadEviction.compact()
             break
           }
           setStore(
             "part",
             event.properties.part.messageID,
             produce((draft) => {
-              draft.splice(result.index, 0, event.properties.part)
+              draft.splice(result.index, 0, part)
             }),
           )
+          payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+          payloadEviction.compact()
           break
         }
 
@@ -494,6 +521,7 @@ export const {
           if (!parts) break
           const result = search(parts, event.properties.partID, (part) => part.id)
           if (!result.found) break
+          if (payloadBudget.isTruncated(event.properties.messageID, event.properties.partID)) break
           touchPart(event.properties.sessionID, event.properties.partID)
           partDeltaBuffer.push({
             messageID: event.properties.messageID,
@@ -501,10 +529,12 @@ export const {
             field: String(event.properties.field),
             delta: event.properties.delta,
           })
+          payloadEviction.compact()
           break
         }
 
         case "message.part.removed": {
+          payloadBudget.removePart(event.properties.messageID, event.properties.partID)
           if (payloadEviction.isEvicted(event.properties.sessionID)) break
           const parts = store.part[event.properties.messageID]
           if (!parts) break
@@ -519,6 +549,7 @@ export const {
               }),
             )
           }
+          payloadEviction.compact()
           break
         }
 
@@ -667,6 +698,9 @@ export const {
         isEvicted(sessionID: string) {
           return payloadEviction.isEvicted(sessionID)
         },
+        permissionInput(messageID: string, callID: string) {
+          return payloadBudget.permissionInput(messageID, callID)
+        },
         get(sessionID: string) {
           const match = search(store.session, sessionID, (s) => s.id)
           if (match.found) return store.session[match.index]
@@ -709,58 +743,74 @@ export const {
             // Fork(lowmem): the session may have been deleted while fetching;
             // writing would resurrect its payloads.
             if (payloadEviction.isDeleted(sessionID)) return
-            setStore(
-              produce((draft) => {
-                const match = search(draft.session, sessionID, (s) => s.id)
-                if (match.found) draft.session[match.index] = session.data!
-                if (!match.found) draft.session.splice(match.index, 0, session.data!)
-                draft.todo[sessionID] = todo.data ?? []
-                const currentMessages = draft.message[sessionID] ?? []
-                const infos = (messages.data ?? []).flatMap((message) => {
-                  if (!tracker.messages.has(message.info.id)) return [message.info]
-                  const current = currentMessages.find((item) => item.id === message.info.id)
-                  return current ? [current] : []
-                })
-                infos.push(
-                  ...currentMessages.filter(
-                    (message) => tracker.messages.has(message.id) && !infos.some((item) => item.id === message.id),
-                  ),
-                )
-                infos.sort(compareMessage)
-                const removed = infos.slice(0, -100)
-                const visible = infos.slice(-100)
-                const visibleIDs = new Set(visible.map((message) => message.id))
-                for (const message of messages.data ?? []) {
-                  if (!visibleIDs.has(message.info.id)) {
-                    delete draft.part[message.info.id]
-                    continue
-                  }
-                  const currentParts = draft.part[message.info.id] ?? []
-                  const parts = message.parts.flatMap((part) => {
-                    const current = currentParts.find((item) => item.id === part.id)
-                    if (tracker.parts.has(part.id)) return current ? [current] : []
-                    if (
-                      current &&
-                      (part.type === "text" || part.type === "reasoning") &&
-                      (current.type === "text" || current.type === "reasoning") &&
-                      part.text.length === 0 &&
-                      current.text.length > 0
-                    ) {
-                      return [current]
-                    }
-                    return [part]
+            const messageIDs = payloadBudget.messageIDs(sessionID)
+            batch(() => {
+              for (const flushed of partDeltaBuffer.flushMessages(messageIDs)) tracker.parts.add(flushed.partID)
+              setStore(
+                produce((draft) => {
+                  const match = search(draft.session, sessionID, (s) => s.id)
+                  if (match.found) draft.session[match.index] = session.data!
+                  if (!match.found) draft.session.splice(match.index, 0, session.data!)
+                  draft.todo[sessionID] = todo.data ?? []
+                  const currentMessages = draft.message[sessionID] ?? []
+                  const infos = (messages.data ?? []).flatMap((message) => {
+                    if (!tracker.messages.has(message.info.id)) return [message.info]
+                    const current = currentMessages.find((item) => item.id === message.info.id)
+                    return current ? [current] : []
                   })
-                  parts.push(
-                    ...currentParts.filter(
-                      (part) => tracker.parts.has(part.id) && !parts.some((item) => item.id === part.id),
+                  infos.push(
+                    ...currentMessages.filter(
+                      (message) => tracker.messages.has(message.id) && !infos.some((item) => item.id === message.id),
                     ),
                   )
-                  draft.part[message.info.id] = parts
-                }
-                for (const message of removed) delete draft.part[message.id]
-                draft.message[sessionID] = visible
-                draft.session_diff[sessionID] = diff.data ?? []
-              }),
+                  infos.sort(compareMessage)
+                  const removed = infos.slice(0, -100)
+                  const visible = infos.slice(-100)
+                  const visibleIDs = new Set(visible.map((message) => message.id))
+                  for (const message of messages.data ?? []) {
+                    if (!visibleIDs.has(message.info.id)) {
+                      delete draft.part[message.info.id]
+                      continue
+                    }
+                    const currentParts = draft.part[message.info.id] ?? []
+                    const parts = message.parts.flatMap((part) => {
+                      const current = currentParts.find((item) => item.id === part.id)
+                      if (tracker.parts.has(part.id)) return current ? [current] : []
+                      if (
+                        current &&
+                        (part.type === "text" || part.type === "reasoning") &&
+                        (current.type === "text" || current.type === "reasoning") &&
+                        part.text.length === 0 &&
+                        current.text.length > 0
+                      ) {
+                        return [current]
+                      }
+                      return [payloadBudget.preparePart(sessionID, part)]
+                    })
+                    parts.push(
+                      ...currentParts.filter(
+                        (part) => tracker.parts.has(part.id) && !parts.some((item) => item.id === part.id),
+                      ),
+                    )
+                    draft.part[message.info.id] = parts
+                  }
+                  for (const message of removed) delete draft.part[message.id]
+                  draft.message[sessionID] = visible
+                  draft.session_diff[sessionID] = diff.data ?? []
+                }),
+              )
+            })
+            const hydratedMessages = store.message[sessionID] ?? []
+            const hydratedParts = Object.fromEntries(
+              Object.entries(store.part).filter(([, parts]) => parts.some((part) => part.sessionID === sessionID)),
+            )
+            for (const messageID of messageIDs) partDeltaBuffer.dropMessage(messageID)
+            payloadBudget.replaceSession(
+              sessionID,
+              hydratedMessages,
+              hydratedParts,
+              store.todo[sessionID],
+              store.session_diff[sessionID],
             )
             fullSyncedSessions.add(sessionID)
           })().finally(() => {
@@ -777,10 +827,12 @@ export const {
           return task
         },
       },
+      payload: {
+        stats() {
+          return payloadBudget.stats()
+        },
+      },
       bootstrap,
-    }
-    requestRevival = (sessionID) => {
-      void result.session.sync(sessionID).catch(() => {})
     }
     return result
   },

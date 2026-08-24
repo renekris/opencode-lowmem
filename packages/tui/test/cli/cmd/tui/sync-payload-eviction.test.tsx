@@ -251,7 +251,7 @@ test("re-entering an evicted session re-hydrates its payload", async () => {
   }
 })
 
-test("protected oldest sessions do not block eviction of later excess", async () => {
+test("the active route session stays protected while later excess is evicted", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const { app, emit, sync } = await mount(fetchFor(), tmp.path)
@@ -260,20 +260,15 @@ test("protected oldest sessions do not block eviction of later excess", async ()
     const ids = await seed(emit, "ses_scan", 20)
     await wait(() => ids.every((id) => sync.data.message[id]?.length === 1))
 
-    emit(
-      global({ id: "evt_busy_1", type: "session.status", properties: { sessionID: ids[0], status: { type: "busy" } } }),
-    )
-    emit(
-      global({ id: "evt_busy_2", type: "session.status", properties: { sessionID: ids[1], status: { type: "busy" } } }),
-    )
+    sync.session.activate(ids[0])
     pushExtra(emit, "1")
     pushExtra(emit, "2")
     await wait(() => sync.data.message["ses_extra_2"]?.length === 1)
 
     expect(sync.data.message[ids[0]]).toHaveLength(1)
-    expect(sync.data.message[ids[1]]).toHaveLength(1)
-    expect(sync.data.message[ids[2]]).toBeUndefined()
-    expect(sync.data.message[ids[3]]).toBeUndefined()
+    expect(sync.data.message[ids[1]]).toBeUndefined()
+    expect(sync.data.message[ids[2]]).toHaveLength(1)
+    expect(sync.data.message[ids[3]]).toHaveLength(1)
     expect(sync.data.message[ids[4]]).toHaveLength(1)
   } finally {
     app.renderer.destroy()
@@ -310,14 +305,13 @@ test("the activated route session survives child preview syncs", async () => {
     sync.session.activate(ids[0])
     for (const id of ids.slice(1, 20)) await sync.session.sync(id)
     await sync.session.sync("ses_child_preview")
-    await wait(() => sync.data.message[ids[1]] === undefined)
     pushExtra(emit, "1")
     pushExtra(emit, "2")
-    await Bun.sleep(150)
+    await wait(() => sync.payload.stats().evictions > 0)
 
     expect(sync.data.message[ids[0]]).toHaveLength(1)
     expect(sync.data.message["ses_child_preview"]).toHaveLength(1)
-    expect(sync.data.message[ids[2]]).toHaveLength(1)
+    expect(sync.payload.stats().evictableSessionCount).toBeLessThanOrEqual(20)
   } finally {
     app.renderer.destroy()
   }
@@ -388,8 +382,8 @@ test("protection lifting compacts without new session buckets", async () => {
           properties: { sessionID: id, info: terminalMessage(id, 0) },
         }),
       )
-    await wait(() => ids.every((id) => sync.data.message[id]?.length === 1))
-    expect(ids.filter((id) => sync.data.message[id] !== undefined).length).toBe(25)
+    await wait(() => sync.data.message[ids[24]] !== undefined)
+    expect(ids.filter((id) => sync.data.message[id] !== undefined).length).toBe(20)
 
     for (const id of ids)
       emit(
@@ -399,8 +393,6 @@ test("protection lifting compacts without new session buckets", async () => {
           properties: { sessionID: id, status: { type: "idle" } },
         }),
       )
-    await wait(() => ids.filter((id) => sync.data.message[id] !== undefined).length <= 20)
-
     expect(ids.filter((id) => sync.data.message[id] !== undefined).length).toBe(20)
     expect(sync.data.message[ids[24]]).toHaveLength(1)
   } finally {
@@ -408,7 +400,7 @@ test("protection lifting compacts without new session buckets", async () => {
   }
 })
 
-test("activity on an evicted session revives its payloads", async () => {
+test("activity on an evicted session does not revive its payloads", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const { app, emit, sync } = await mount(fetchFor(), tmp.path)
@@ -430,9 +422,10 @@ test("activity on an evicted session revives its payloads", async () => {
     emit(
       global({ id: "evt_revive_user", type: "message.updated", properties: { sessionID: ids[0], info: userMessage } }),
     )
-    await wait(() => sync.data.message[ids[0]]?.length === 1)
+    await Bun.sleep(100)
 
-    expect(sync.data.message[ids[0]]).toHaveLength(1)
+    expect(sync.data.message[ids[0]]).toBeUndefined()
+    expect(sync.session.isEvicted(ids[0])).toBe(true)
   } finally {
     app.renderer.destroy()
   }
@@ -744,7 +737,7 @@ test("user messages for unknown sessions rank provisionally until a row proves t
   }
 })
 
-test("legacy plugin payload getters refetch evicted session payloads", async () => {
+test("legacy plugin payload getters do not refetch evicted session payloads", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const { app, emit, sync } = await mount(fetchFor(), tmp.path)
@@ -761,8 +754,10 @@ test("legacy plugin payload getters refetch evicted session payloads", async () 
 
     const state = stateApi(sync)
     expect(state.session.messages(ids[2])).toHaveLength(0)
+    expect(sync.session.isEvicted(ids[2])).toBe(true)
+    await state.session.ensure(ids[2])
     expect(sync.session.isEvicted(ids[2])).toBe(false)
-    await wait(() => sync.data.message[ids[2]]?.length === 1)
+    expect(sync.data.message[ids[2]]).toHaveLength(1)
   } finally {
     app.renderer.destroy()
   }
