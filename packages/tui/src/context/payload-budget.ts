@@ -40,6 +40,25 @@ type PayloadBudgetOptions = {
 
 type StoredSize = { readonly sessionID: string; readonly bytes: number }
 
+const permissionDisplayFields: ReadonlySet<string> = new Set([
+  "filePath",
+  "pattern",
+  "path",
+  "command",
+  "subagent_type",
+  "description",
+  "url",
+  "query",
+  "provider",
+])
+
+function truncatePermissionInput(value: Record<string, unknown>, bytes: number): Record<string, unknown> {
+  const marker = `[payload omitted by lowmem budget: ${bytes} bytes]`
+  const keys = Object.keys(value).filter((key) => permissionDisplayFields.has(key))
+  if (keys.length === 0) return { __lowmem: marker }
+  return Object.fromEntries(keys.map((key) => [key, marker]))
+}
+
 export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const budgetBytes = options.budgetBytes ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_BUDGET_MB", "256MB")
   const sessionLimit = options.sessionLimit ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_SESSION_LIMIT", "20", "count")
@@ -47,6 +66,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     options.activeAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_ALLOWANCE_MB", "128MB")
   const permissionAllowanceBytes =
     options.permissionAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_PERMISSION_ALLOWANCE_MB", "32MB")
+  const permissionMapAllowanceBytes = permissionAllowanceBytes * 2
   const partIngressBytes = options.partIngressBytes ?? readEnvLimit("OPENCODE_TUI_PART_INGRESS_MAX_KB", "256KB")
   const messages = new Map<string, StoredSize>()
   const parts = new Map<string, StoredSize>()
@@ -93,13 +113,13 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     if (sessionID !== undefined) warnPressure(sessionID)
   }
 
-  function warnPressure(sessionID: string) {
+  function warnPressure(sessionID: string, force = false) {
     const activeBytes = options.isActive?.(sessionID) === true ? resident.get(sessionID) ?? 0 : 0
     const pressure =
       (budgetBytes > 0 && (evictableResident > budgetBytes || protectedResident > budgetBytes)) ||
       (activeAllowanceBytes > 0 && activeBytes > activeAllowanceBytes) ||
       (permissionAllowanceBytes > 0 && permissionBytes > permissionAllowanceBytes)
-    if (!pressure) return
+    if (!pressure && !force) return
     const now = options.now?.() ?? Date.now()
     if (now - lastWarning < WARNING_INTERVAL) return
     lastWarning = now
@@ -107,6 +127,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     warn({
         component: "tui.payload",
         budget: "OPENCODE_TUI_PAYLOAD_BUDGET_MB",
+        reason: pressure ? "pressure" : "permission-truncation",
         evictableResident,
         protectedResident,
         count: sessions.size,
@@ -341,12 +362,21 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     const previousKey = permissionRequests.get(requestKey)
     if (previousKey) clearPermissionKey(previousKey)
     clearPermissionKey(key)
-    permissionInputs.set(key, { sessionID, value })
+    const bytes = serializedUtf8Bytes(value)
+    const truncate =
+      permissionAllowanceBytes > 0 &&
+      (bytes > permissionAllowanceBytes || permissionBytes + bytes > permissionMapAllowanceBytes)
+    const storedValue = truncate ? truncatePermissionInput(value, bytes) : value
+    permissionInputs.set(key, { sessionID, value: storedValue })
     permissionRequests.set(requestKey, key)
     const keys = sessionPermissionKeys.get(sessionID) ?? new Set<string>()
     keys.add(key)
     sessionPermissionKeys.set(sessionID, keys)
-    permissionBytes += serializedUtf8Bytes(value)
+    permissionBytes += serializedUtf8Bytes(storedValue)
+    if (truncate) {
+      truncations++
+      warnPressure(sessionID, true)
+    }
     refresh(sessionID)
   }
 
@@ -378,7 +408,14 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
 
   refresh()
   return {
-    limits: { budgetBytes, sessionLimit, activeAllowanceBytes, permissionAllowanceBytes, partIngressBytes },
+    limits: {
+      budgetBytes,
+      sessionLimit,
+      activeAllowanceBytes,
+      permissionAllowanceBytes,
+      permissionMapAllowanceBytes,
+      partIngressBytes,
+    },
     replaceMessage,
     replacePart,
     replaceParts,

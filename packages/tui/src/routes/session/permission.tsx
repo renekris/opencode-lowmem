@@ -18,8 +18,6 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut } from "../../keyma
 import { usePathFormatter } from "../../context/path-format"
 
 type PermissionStage = "permission" | "always" | "reject"
-type PermissionRequestWithToolInput = PermissionRequest & { toolInput?: Record<string, unknown> }
-
 function EditBody(props: { request: PermissionRequest }) {
   const themeState = useTheme()
   const theme = themeState.theme
@@ -121,7 +119,6 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
 
   const input = createMemo(() => {
-    const request: PermissionRequestWithToolInput = props.request
     const tool = props.request.tool
     if (!tool) return {}
     const parts = sync.data.part[tool.messageID] ?? []
@@ -130,7 +127,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
         return part.state.input ?? {}
       }
     }
-    return sync.session.permissionInput(tool.messageID, tool.callID) ?? request.toolInput ?? {}
+    return sync.session.permissionInput(tool.messageID, tool.callID) ?? props.request.toolInput ?? {}
   })
 
   const { theme } = useTheme()

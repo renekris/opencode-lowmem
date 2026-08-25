@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsgo --noEmit && tsgo --noEmit -p test/tsconfig.json",
     "build": "bun ./script/build.ts"
   },
   "exports": {
@@ -25,6 +25,7 @@
   "devDependencies": {
     "@hey-api/openapi-ts": "0.90.10",
     "@tsconfig/node22": "catalog:",
+    "@types/bun": "catalog:",
     "@types/cross-spawn": "catalog:",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",

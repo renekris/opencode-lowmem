@@ -112,15 +112,42 @@ describe("payload budget", () => {
     expect(budget.messageIDs(part.sessionID)).toEqual([])
   })
 
-  test("retains every outstanding permission input without applying payload caps", () => {
-    const budget = createPayloadBudget({ permissionAllowanceBytes: 1 })
+  test("stores an oversized permission input as a dialog-visible marker", () => {
+    const budget = createPayloadBudget({ permissionAllowanceBytes: 64 })
+    const input = { filePath: "/" + "x".repeat(256) }
 
-    for (let index = 0; index < 257; index++)
-      budget.setPermissionInput("ses_permission", `per_${index}`, "msg_permission", `call_${index}`, {
-        filePath: `/${"x".repeat(256)}/${index}`,
-      })
+    budget.setPermissionInput("ses_permission", "per_oversized", "msg_permission", "call_oversized", input)
 
-    expect(budget.stats().permissionBytes).toBeGreaterThan(257)
+    const stored = budget.permissionInput("msg_permission", "call_oversized")
+    expect(stored?.filePath).toContain("payload omitted by lowmem budget")
+    expect(stored).not.toEqual(input)
+  })
+
+  test("truncates new permission inputs when the total map allowance is reached", () => {
+    const budget = createPayloadBudget({ permissionAllowanceBytes: 1000 })
+    const input = { filePath: "x".repeat(400) }
+
+    for (let index = 0; index < 4; index++) {
+      budget.setPermissionInput("ses_permission", `per_${index}`, "msg_permission", `call_${index}`, input)
+    }
+    budget.setPermissionInput("ses_permission", "per_total", "msg_permission", "call_total", input)
+
+    expect(budget.permissionInput("msg_permission", "call_0")).toEqual(input)
+    expect(budget.permissionInput("msg_permission", "call_3")).toEqual(input)
+    expect(budget.permissionInput("msg_permission", "call_total")?.filePath).toContain("payload omitted by lowmem budget")
+    expect(budget.stats().permissionBytes).toBeLessThanOrEqual(2000)
+  })
+
+  test("exact zero keeps permission inputs unbounded", () => {
+    const budget = createPayloadBudget({ permissionAllowanceBytes: 0 })
+    const input = { filePath: "/" + "x".repeat(256) }
+
+    for (let index = 0; index < 257; index++) {
+      budget.setPermissionInput("ses_permission", `per_${index}`, "msg_permission", `call_${index}`, input)
+    }
+
+    expect(budget.permissionInput("msg_permission", "call_0")).toEqual(input)
+    expect(budget.stats().permissionBytes).toBe(257 * serializedUtf8Bytes(input))
     for (let index = 0; index < 257; index++) budget.clearPermissionRequest("ses_permission", `per_${index}`)
     expect(budget.stats().permissionBytes).toBe(0)
   })

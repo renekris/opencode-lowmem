@@ -268,21 +268,25 @@ export const {
             })
             break
           }
+          // toolInput lives only in the bounded payload-budget map; the store copy
+          // must not retain the full payload for the outstanding permission's lifetime.
+          const stored: PermissionRequestWithToolInput =
+            request.toolInput === undefined ? request : { ...request, toolInput: undefined }
           const requests = store.permission[request.sessionID]
           if (!requests) {
-            setStore("permission", request.sessionID, [request])
+            setStore("permission", request.sessionID, [stored])
             break
           }
           const match = search(requests, request.id, (r) => r.id)
           if (match.found) {
-            setStore("permission", request.sessionID, match.index, reconcile(request))
+            setStore("permission", request.sessionID, match.index, reconcile(stored))
             break
           }
           setStore(
             "permission",
             request.sessionID,
             produce((draft) => {
-              draft.splice(match.index, 0, request)
+              draft.splice(match.index, 0, stored)
             }),
           )
           break

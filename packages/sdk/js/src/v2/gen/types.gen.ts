@@ -1389,6 +1389,9 @@ export type GlobalEvent = {
             messageID: string
             callID: string
           }
+          toolInput?: {
+            [key: string]: unknown
+          }
         }
       }
     | {
@@ -2477,6 +2480,9 @@ export type PermissionRequest = {
   tool?: {
     messageID: string
     callID: string
+  }
+  toolInput?: {
+    [key: string]: unknown
   }
 }
 
@@ -5718,6 +5724,9 @@ export type PermissionAsked = {
       messageID: string
       callID: string
     }
+    toolInput?: {
+      [key: string]: unknown
+    }
   }
 }
 
@@ -6871,6 +6880,9 @@ export type EventPermissionAsked = {
     tool?: {
       messageID: string
       callID: string
+    }
+    toolInput?: {
+      [key: string]: unknown
     }
   }
 }

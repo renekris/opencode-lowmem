@@ -176,6 +176,61 @@ test("sessions with pending permissions are never evicted", async () => {
   }
 })
 
+test("pending permission toolInput is bounded, not retained in the store", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_ptool", 2)
+    await wait(() => ids.every((id) => sync.data.message[id]?.length === 1))
+
+    emit(
+      global({
+        id: "evt_perm_huge",
+        type: "permission.asked",
+        properties: {
+          id: "per_huge",
+          sessionID: ids[0],
+          permission: "bash",
+          patterns: [],
+          metadata: {},
+          always: [],
+          tool: { messageID: `msg_${ids[0]}_0`, callID: "call_huge" },
+          toolInput: { command: "x".repeat(33 * 1024 * 1024) },
+        },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_perm_small",
+        type: "permission.asked",
+        properties: {
+          id: "per_small",
+          sessionID: ids[1],
+          permission: "bash",
+          patterns: [],
+          metadata: {},
+          always: [],
+          tool: { messageID: `msg_${ids[1]}_0`, callID: "call_small" },
+          toolInput: { command: "ls -la" },
+        },
+      }),
+    )
+    await wait(() => (sync.data.permission[ids[0]]?.length ?? 0) === 1 && (sync.data.permission[ids[1]]?.length ?? 0) === 1)
+
+    expect(sync.data.permission[ids[0]]![0]!.toolInput).toBeUndefined()
+    expect(sync.data.permission[ids[1]]![0]!.toolInput).toBeUndefined()
+
+    const hugeBounded = sync.session.permissionInput(`msg_${ids[0]}_0`, "call_huge")
+    expect(String(hugeBounded?.command)).toContain("payload omitted by lowmem budget")
+    const smallBounded = sync.session.permissionInput(`msg_${ids[1]}_0`, "call_small")
+    expect(smallBounded?.command).toBe("ls -la")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("orphan part updates do not resurrect evicted sessions", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
