@@ -388,8 +388,10 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 database tools
 
 Commands:
-  opencode db [query]     open an interactive sqlite3 shell or run a query                 [default]
+  opencode db stats       show read-only database size statistics
+  opencode db vacuum      reclaim free database pages while offline
   opencode db path        print the database path
+  opencode db [query]     open an interactive sqlite3 shell or run a query                 [default]
 
 Positionals:
   query  SQL query to execute                                                               [string]
