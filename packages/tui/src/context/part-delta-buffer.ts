@@ -28,10 +28,16 @@ export function createPartDeltaBuffer(options: DeltaBufferOptions) {
   let lastWarning = 0
   let pressureFlushes = 0
 
+  function pendingBytesForMessage(messageID: string) {
+    let total = 0
+    for (const entry of pending.values()) if (entry.messageID === messageID) total += entry.bytes
+    return total
+  }
+
   function notify(entry: PendingEntry, nextBytes: number) {
     bytes += nextBytes - entry.bytes
     entry.bytes = nextBytes
-    options.onPendingBytes?.(entry.messageID, nextBytes)
+    options.onPendingBytes?.(entry.messageID, pendingBytesForMessage(entry.messageID))
   }
 
   function flushEntry(key: string): FlushedPart | undefined {

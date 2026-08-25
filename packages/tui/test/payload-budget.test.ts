@@ -112,6 +112,39 @@ describe("payload budget", () => {
     expect(budget.messageIDs(part.sessionID)).toEqual([])
   })
 
+  test("aggregates pending delta bytes for every part of one message", () => {
+    const messageID = "msg_delta_sum"
+    const partA = { id: "prt_delta_a", sessionID: "ses_delta_sum", messageID, type: "text", text: "" } satisfies Part
+    const partB = { id: "prt_delta_b", sessionID: "ses_delta_sum", messageID, type: "text", text: "" } satisfies Part
+    const budget = createPayloadBudget()
+    budget.replacePart(messageID, partA.id, partA.sessionID, partA)
+    budget.replacePart(messageID, partB.id, partB.sessionID, partB)
+    let afterPartA: number | undefined
+    const buffer = createPartDeltaBuffer({
+      maxBytes: 0,
+      maxEntries: 0,
+      intervalMs: 10_000,
+      onPendingBytes: budget.replacePendingDelta,
+      apply: (entry) => {
+        if (entry.partID === partA.id) afterPartA = budget.stats().evictableResident
+      },
+    })
+    const delta = "x".repeat(3 * 1024 * 1024)
+    const deltaBytes = 3 * 1024 * 1024
+    const partBytes = serializedUtf8Bytes(partA) + serializedUtf8Bytes(partB)
+
+    buffer.push({ messageID, partID: partA.id, field: "text", delta })
+    buffer.push({ messageID, partID: partB.id, field: "text", delta })
+
+    expect(budget.stats().evictableResident).toBe(partBytes + 2 * deltaBytes)
+    expect(buffer.flushMessages([messageID])).toEqual([
+      { messageID, partID: partA.id },
+      { messageID, partID: partB.id },
+    ])
+    expect(afterPartA).toBe(partBytes + deltaBytes)
+    expect(budget.stats().evictableResident).toBe(partBytes)
+  })
+
   test("stores an oversized permission input as a dialog-visible marker", () => {
     const budget = createPayloadBudget({ permissionAllowanceBytes: 64 })
     const input = { filePath: "/" + "x".repeat(256) }
@@ -150,6 +183,110 @@ describe("payload budget", () => {
     expect(budget.stats().permissionBytes).toBe(257 * serializedUtf8Bytes(input))
     for (let index = 0; index < 257; index++) budget.clearPermissionRequest("ses_permission", `per_${index}`)
     expect(budget.stats().permissionBytes).toBe(0)
+  })
+
+  test("removing one tool part clears only its permission input", () => {
+    const budget = createPayloadBudget()
+    const partA = {
+      id: "prt_permission_a",
+      sessionID: "ses_permission_parts",
+      messageID: "msg_permission_parts",
+      type: "tool",
+      callID: "call_a",
+      tool: "read",
+      state: {
+        status: "completed",
+        input: { filePath: "a" },
+        output: "done",
+        title: "read",
+        metadata: {},
+        time: { start: 1, end: 2 },
+      },
+    } satisfies Part
+    const partB = { ...partA, id: "prt_permission_b", callID: "call_b" } satisfies Part
+    budget.replacePart(partA.messageID, partA.id, partA.sessionID, partA)
+    budget.replacePart(partB.messageID, partB.id, partB.sessionID, partB)
+    budget.setPermissionInput(partA.sessionID, "per_a", partA.messageID, partA.callID, { filePath: "a" })
+    budget.setPermissionInput(partB.sessionID, "per_b", partB.messageID, partB.callID, { filePath: "b" })
+
+    budget.removePart(partA.messageID, partA.id)
+
+    expect(budget.permissionInput(partA.messageID, partA.callID)).toBeUndefined()
+    expect(budget.permissionInput(partB.messageID, partB.callID)).toEqual({ filePath: "b" })
+  })
+
+  test("a new permission survives cleanup of an old removed-part request", () => {
+    const budget = createPayloadBudget()
+    const part = {
+      id: "prt_permission_reuse",
+      sessionID: "ses_permission_reuse",
+      messageID: "msg_permission_reuse",
+      type: "tool",
+      callID: "call_reuse",
+      tool: "read",
+      state: {
+        status: "completed",
+        input: { filePath: "old" },
+        output: "done",
+        title: "read",
+        metadata: {},
+        time: { start: 1, end: 2 },
+      },
+    } satisfies Part
+    budget.replacePart(part.messageID, part.id, part.sessionID, part)
+    budget.setPermissionInput(part.sessionID, "per_old", part.messageID, part.callID, { filePath: "old" })
+    budget.removePart(part.messageID, part.id)
+    budget.replacePart(part.messageID, part.id, part.sessionID, part)
+    budget.setPermissionInput(part.sessionID, "per_new", part.messageID, part.callID, { filePath: "new" })
+
+    budget.clearPermissionRequest(part.sessionID, "per_old")
+
+    expect(budget.permissionInput(part.messageID, part.callID)).toEqual({ filePath: "new" })
+  })
+
+  test("caps oversized active parts while preserving smaller active parts", () => {
+    const budget = createPayloadBudget({
+      activePartMaxBytes: 32 * 1024 * 1024,
+      isActive: (sessionID) => sessionID === "ses_active_cap",
+      isProtected: (sessionID) => sessionID === "ses_active_cap",
+    })
+    const large = {
+      id: "prt_active_large",
+      sessionID: "ses_active_cap",
+      messageID: "msg_active_cap",
+      type: "text",
+      text: "x".repeat(40 * 1024 * 1024),
+    } satisfies Part
+    const small = { ...large, id: "prt_active_small", text: "x".repeat(1024 * 1024) } satisfies Part
+    const result = budget.preparePart(large.sessionID, large)
+
+    expect(result.type).toBe("text")
+    if (result.type !== "text") return
+    expect(result.text).toContain("payload omitted by lowmem budget")
+    budget.replacePart(result.messageID, result.id, result.sessionID, result)
+    expect(budget.stats().protectedResident).toBe(serializedUtf8Bytes(result))
+    expect(budget.preparePart(small.sessionID, small)).toEqual(small)
+  })
+
+  test("exact zero disables the active part cap", () => {
+    const name = "OPENCODE_TUI_ACTIVE_PART_MAX_MB"
+    const previous = process.env[name]
+    process.env[name] = "0"
+    try {
+      const budget = createPayloadBudget({ isActive: () => true })
+      const part = {
+        id: "prt_active_unbounded",
+        sessionID: "ses_active_unbounded",
+        messageID: "msg_active_unbounded",
+        type: "text",
+        text: "x".repeat(40 * 1024 * 1024),
+      } satisfies Part
+
+      expect(budget.preparePart(part.sessionID, part)).toEqual(part)
+    } finally {
+      if (previous === undefined) delete process.env[name]
+      else process.env[name] = previous
+    }
   })
 
   test("flushes delta entries at byte or count pressure and decrements dropped bytes", () => {

@@ -30,6 +30,7 @@ type PayloadBudgetOptions = {
   readonly budgetBytes?: number
   readonly sessionLimit?: number
   readonly activeAllowanceBytes?: number
+  readonly activePartMaxBytes?: number
   readonly permissionAllowanceBytes?: number
   readonly partIngressBytes?: number
   readonly isProtected?: (sessionID: string) => boolean
@@ -64,6 +65,8 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const sessionLimit = options.sessionLimit ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_SESSION_LIMIT", "20", "count")
   const activeAllowanceBytes =
     options.activeAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_ALLOWANCE_MB", "128MB")
+  const activePartMaxBytes =
+    options.activePartMaxBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_PART_MAX_MB", "32MB")
   const permissionAllowanceBytes =
     options.permissionAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_PERMISSION_ALLOWANCE_MB", "32MB")
   const permissionMapAllowanceBytes = permissionAllowanceBytes * 2
@@ -74,6 +77,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const todos = new Map<string, number>()
   const diffs = new Map<string, number>()
   const pending = new Map<string, StoredSize>()
+  const partCallIDs = new Map<string, string>()
   const sessions = new Set<string>()
   const permissionInputs = new Map<string, { readonly sessionID: string; readonly value: Record<string, unknown> }>()
   const permissionRequests = new Map<string, string>()
@@ -157,10 +161,21 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     if (previous) adjust(previous.sessionID, -previous.bytes)
     if (value === undefined) {
       parts.delete(key)
+      partCallIDs.delete(key)
       if (![...parts.keys()].some((partKey) => partKey.startsWith(`${messageID}:`))) partSessions.delete(messageID)
     } else {
       const bytes = serializedUtf8Bytes(value)
       parts.set(key, { sessionID, bytes })
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "type" in value &&
+        value.type === "tool" &&
+        "callID" in value &&
+        typeof value.callID === "string"
+      ) {
+        partCallIDs.set(key, value.callID)
+      } else partCallIDs.delete(key)
       partSessions.set(messageID, sessionID)
       sessions.add(sessionID)
       adjust(sessionID, bytes)
@@ -173,6 +188,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       if (!key.startsWith(`${messageID}:`)) continue
       adjust(value.sessionID, -value.bytes)
       parts.delete(key)
+      partCallIDs.delete(key)
       truncatedParts.delete(key)
     }
     partSessions.delete(messageID)
@@ -198,6 +214,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       if (!key.startsWith(`${messageID}:`)) continue
       adjust(value.sessionID, -value.bytes)
       parts.delete(key)
+      partCallIDs.delete(key)
       truncatedParts.delete(key)
     }
     const pendingValue = pending.get(messageID)
@@ -206,7 +223,6 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       pending.delete(messageID)
     }
     partSessions.delete(messageID)
-    clearPermissionForMessage(messageID)
     if (sessionID !== undefined) refresh(sessionID)
   }
 
@@ -221,6 +237,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       if (value.sessionID !== sessionID) continue
       adjust(sessionID, -value.bytes)
       parts.delete(key)
+      partCallIDs.delete(key)
       truncatedParts.delete(key)
     }
     for (const [messageID, value] of pending) {
@@ -240,7 +257,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   }
 
   function replacePendingDelta(messageID: string, bytes: number) {
-    const sessionID = partSessions.get(messageID)
+    const sessionID = partSessions.get(messageID) ?? pending.get(messageID)?.sessionID
     if (sessionID === undefined) return
     const previous = pending.get(messageID)
     if (previous) adjust(sessionID, -previous.bytes)
@@ -269,6 +286,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       if (value.sessionID !== sessionID) continue
       adjust(sessionID, -value.bytes)
       parts.delete(key)
+      partCallIDs.delete(key)
       truncatedParts.delete(key)
     }
     for (const [messageID, value] of pending) {
@@ -305,17 +323,19 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
 
   function preparePart(sessionID: string, part: Part): Part {
     const key = `${part.messageID}:${part.id}`
-    if (options.isActive?.(sessionID) === true || partIngressBytes === 0) {
+    const scalarLimit = options.isActive?.(sessionID) === true ? activePartMaxBytes : partIngressBytes
+    if (scalarLimit === 0) {
       clearTruncated(part.messageID, part.id)
       return part
     }
     let result = part
     let exceeded = false
     const scalar = (value: string) => {
-      if (serializedUtf8Bytes(value) <= partIngressBytes) return value
+      const bytes = serializedUtf8Bytes(value)
+      if (bytes <= scalarLimit) return value
       exceeded = true
       markTruncated(key)
-      return `[payload omitted by lowmem budget: ${serializedUtf8Bytes(value)} bytes]`
+      return `[payload omitted by lowmem budget: ${bytes} bytes]`
     }
     switch (part.type) {
       case "text":
@@ -382,10 +402,14 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
 
   function clearPermissionKey(key: string) {
     const previous = permissionInputs.get(key)
-    if (!previous) return
-    permissionBytes -= serializedUtf8Bytes(previous.value)
-    permissionInputs.delete(key)
-    sessionPermissionKeys.get(previous.sessionID)?.delete(key)
+    if (previous) {
+      permissionBytes -= serializedUtf8Bytes(previous.value)
+      permissionInputs.delete(key)
+      sessionPermissionKeys.get(previous.sessionID)?.delete(key)
+    }
+    for (const [requestKey, permissionKeyValue] of permissionRequests) {
+      if (permissionKeyValue === key) permissionRequests.delete(requestKey)
+    }
   }
 
   function clearPermissionRequest(sessionID: string, requestID: string) {
@@ -412,6 +436,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       budgetBytes,
       sessionLimit,
       activeAllowanceBytes,
+      activePartMaxBytes,
       permissionAllowanceBytes,
       permissionMapAllowanceBytes,
       partIngressBytes,
@@ -425,12 +450,15 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     removeMessage: (sessionID: string, messageID: string) => {
       replaceMessage(sessionID, messageID, undefined)
       clearTruncated(messageID)
+      clearPermissionForMessage(messageID)
     },
     removePart: (messageID: string, partID: string) => {
-      const sessionID = parts.get(`${messageID}:${partID}`)?.sessionID ?? partSessions.get(messageID)
+      const key = `${messageID}:${partID}`
+      const sessionID = parts.get(key)?.sessionID ?? partSessions.get(messageID)
+      const callID = partCallIDs.get(key)
       if (sessionID) replacePart(messageID, partID, sessionID, undefined)
       clearTruncated(messageID, partID)
-      clearPermissionForMessage(messageID)
+      if (callID !== undefined) clearPermissionKey(permissionKey(messageID, callID))
     },
     removeParts,
     removeSession,
