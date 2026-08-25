@@ -3,48 +3,99 @@ export * as BackgroundJob from "./background-job"
 import { Cause, Clock, Context, Deferred, Effect, Exit, Layer, Scope, SynchronizedRef } from "effect"
 import { Identifier } from "./id/id"
 import { makeGlobalNode } from "./effect/app-node"
+import { EnvLimit } from "./util/env-limit"
 
 export type Status = "running" | "completed" | "error" | "cancelled"
 
 export type Info = {
-  id: string
-  type: string
-  title?: string
-  status: Status
-  started_at: number
-  completed_at?: number
-  output?: string
-  error?: string
-  metadata?: Record<string, unknown>
+  readonly id: string
+  readonly type: string
+  readonly title?: string
+  readonly status: Status
+  readonly started_at: number
+  readonly completed_at?: number
+  readonly output?: string
+  readonly error?: string
+  readonly metadata?: Record<string, unknown>
+}
+
+/**
+ * Waiting returns either an available running/terminal snapshot or an explicit
+ * expiry after count eviction. A removed entry never fabricates terminal info.
+ */
+export type WaitResult =
+  | {
+      readonly status: "available"
+      readonly info?: Info
+      readonly timedOut: boolean
+    }
+  | {
+      readonly status: "expired"
+      readonly info?: undefined
+      readonly timedOut: false
+    }
+
+export type Inspection = {
+  readonly entryCount: number
+  readonly runningCount: number
+  readonly settledCount: number
+  readonly settledOutputBytes: number
+  readonly evictions: number
+  readonly outputStrips: number
+  readonly waiters: number
+  readonly settledResources: {
+    readonly deferreds: number
+    readonly scopes: number
+    readonly tokens: number
+  }
 }
 
 type Active = {
-  info: Info
-  done: Deferred.Deferred<Info>
-  scope: Scope.Closeable
-  token: object
-  pending: number
-  next: number
-  output?: { sequence: number; text: string }
-  tail: Deferred.Deferred<void>
-  promoted: Deferred.Deferred<Info>
-  onPromote?: Effect.Effect<void>
+  readonly kind: "active"
+  readonly info: Info
+  readonly done: Deferred.Deferred<Info>
+  readonly scope: Scope.Closeable
+  readonly token: object
+  readonly pending: number
+  readonly next: number
+  readonly output?: { readonly sequence: number; readonly text: string }
+  readonly tail: Deferred.Deferred<void>
+  readonly promoted: Deferred.Deferred<Info>
+  readonly onPromote?: Effect.Effect<void>
+  readonly waiters: number
+}
+
+// Only Active entries retain execution resources. Terminal entries contain plain
+// metadata and are the sole members of the bounded settled ring.
+type Terminal = {
+  readonly kind: "terminal"
+  readonly info: Info
+}
+
+type Entry = Active | Terminal
+
+type Registry = {
+  readonly entries: Map<string, Entry>
+  readonly settled: readonly string[]
+  readonly settledOutputBytes: number
+  readonly evictions: number
+  readonly outputStrips: number
+  readonly waiters: number
+  readonly lastWarningAt?: number
 }
 
 type State = {
-  jobs: SynchronizedRef.SynchronizedRef<Map<string, Active>>
+  registry: SynchronizedRef.SynchronizedRef<Registry>
   scope: Scope.Scope
 }
 
 type FinishResult = {
   info?: Info
-  done?: Deferred.Deferred<Info>
-  scope?: Scope.Closeable
+  warning?: PressureWarning
 }
 
 type PromoteResult = {
   info?: Info
-  promoted?: Deferred.Deferred<Info>
   onPromote?: Effect.Effect<void>
 }
 
@@ -80,28 +131,153 @@ export type WaitInput = {
   timeout?: number
 }
 
-export type WaitResult = {
-  info?: Info
-  timedOut: boolean
-}
-
 export interface Interface {
   readonly list: () => Effect.Effect<Info[]>
   readonly get: (id: string) => Effect.Effect<Info | undefined>
   readonly start: (input: StartInput) => Effect.Effect<Info>
   readonly extend: (input: ExtendInput) => Effect.Effect<boolean>
   readonly wait: (input: WaitInput) => Effect.Effect<WaitResult>
-  readonly waitForPromotion: (id: string) => Effect.Effect<Info>
+  readonly waitForPromotion: (id: string) => Effect.Effect<Info | undefined>
   readonly promote: (id: string) => Effect.Effect<Info | undefined>
   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundJob") {}
 
-function snapshot(job: Active): Info {
+type PressureWarning = {
+  readonly component: "background-job"
+  readonly budget: "settled-ring"
+  readonly evictableResident: number
+  readonly protectedResident: 0
+  readonly count: number
+  readonly evictions: number
+  readonly truncations: number
+  readonly jobID: string
+}
+
+type RingConfig = {
+  readonly maxSettled: number
+  readonly maxOutputBytes: number
+}
+
+type WaitReservation =
+  | { readonly kind: "expired" }
+  | { readonly kind: "available"; readonly info: Info; readonly timedOut: boolean }
+  | { readonly kind: "running"; readonly done: Deferred.Deferred<Info>; readonly token: object }
+
+const SETTLED_MAX = "100"
+const SETTLED_OUTPUT_MAX_MB = "8MB"
+const WARNING_INTERVAL = 60_000
+const textEncoder = new TextEncoder()
+
+function snapshot(info: Info): Info {
   return {
-    ...job.info,
-    ...(job.info.metadata ? { metadata: { ...job.info.metadata } } : {}),
+    ...info,
+    ...(info.metadata ? { metadata: { ...info.metadata } } : {}),
+  }
+}
+
+function snapshotEntry(entry: Entry): Info {
+  return snapshot(entry.info)
+}
+
+function outputBytes(info: Info) {
+  return info.output === undefined ? 0 : textEncoder.encode(info.output).byteLength
+}
+
+function stripOutput(info: Info): Info {
+  const copy = { ...info }
+  delete copy.output
+  return copy
+}
+
+function ringConfig(): RingConfig {
+  return {
+    maxSettled: EnvLimit.readEnvLimit("OPENCODE_BGJOB_SETTLED_MAX", SETTLED_MAX, "count"),
+    maxOutputBytes: EnvLimit.readEnvLimit("OPENCODE_BGJOB_SETTLED_OUTPUT_MAX_MB", SETTLED_OUTPUT_MAX_MB, "bytes"),
+  }
+}
+
+function putEntry(registry: Registry, id: string, entry: Entry): Registry {
+  const previous = registry.entries.get(id)
+  const entries = new Map(registry.entries).set(id, entry)
+  if (previous?.kind !== "terminal") return { ...registry, entries }
+
+  return {
+    ...registry,
+    entries,
+    settled: registry.settled.filter((settledID) => settledID !== id),
+    settledOutputBytes: registry.settledOutputBytes - outputBytes(previous.info),
+  }
+}
+
+type RingResult = {
+  readonly registry: Registry
+  readonly warning?: PressureWarning
+}
+
+function retainTerminal(registry: Registry, id: string, info: Info, config: RingConfig, now: number): RingResult {
+  const base = putEntry(registry, id, { kind: "terminal", info })
+  const entries = new Map(base.entries)
+  const settled = [...base.settled, id]
+  let settledOutputBytes = base.settledOutputBytes + outputBytes(info)
+  let outputStrips = base.outputStrips
+  let evictions = base.evictions
+  let pressure = false
+
+  const stripOverage = (ids: readonly string[]) => {
+    if (config.maxOutputBytes <= 0 || settledOutputBytes <= config.maxOutputBytes) return
+    pressure = true
+    for (const settledID of ids) {
+      if (settledOutputBytes <= config.maxOutputBytes) break
+      const entry = entries.get(settledID)
+      if (entry?.kind !== "terminal" || entry.info.output === undefined) continue
+      settledOutputBytes -= outputBytes(entry.info)
+      entries.set(settledID, { kind: "terminal", info: stripOutput(entry.info) })
+      outputStrips += 1
+    }
+  }
+
+  stripOverage(settled)
+
+  const countPressure = config.maxSettled > 0 && settled.length > config.maxSettled
+  if (countPressure) {
+    pressure = true
+    for (const expiredID of settled.slice(0, settled.length - config.maxSettled)) {
+      const entry = entries.get(expiredID)
+      if (entry?.kind !== "terminal") continue
+      settledOutputBytes -= outputBytes(entry.info)
+      entries.delete(expiredID)
+      evictions += 1
+    }
+  }
+
+  const retained = countPressure ? settled.slice(settled.length - config.maxSettled) : settled
+  stripOverage(retained)
+
+  const shouldWarn = pressure && (base.lastWarningAt === undefined || now - base.lastWarningAt >= WARNING_INTERVAL)
+  const next: Registry = {
+    ...base,
+    entries,
+    settled: retained,
+    settledOutputBytes,
+    evictions,
+    outputStrips,
+    ...(shouldWarn ? { lastWarningAt: now } : {}),
+  }
+  if (!shouldWarn) return { registry: next }
+  return {
+    registry: next,
+    warning: {
+      component: "background-job",
+      budget: "settled-ring",
+      evictableResident: settledOutputBytes,
+      protectedResident: 0,
+      count: retained.length,
+      evictions,
+      truncations: outputStrips,
+      jobID: id,
+    },
   }
 }
 
@@ -118,8 +294,16 @@ function errorText(error: unknown) {
  * those semantics.
  */
 export const make = Effect.gen(function* () {
+  const config = ringConfig()
   const state: State = {
-    jobs: yield* SynchronizedRef.make(new Map()),
+    registry: yield* SynchronizedRef.make<Registry>({
+      entries: new Map(),
+      settled: [],
+      settledOutputBytes: 0,
+      evictions: 0,
+      outputStrips: 0,
+      waiters: 0,
+    }),
     scope: yield* Scope.Scope,
   }
 
@@ -130,43 +314,51 @@ export const make = Effect.gen(function* () {
     exit: Exit.Exit<string, unknown>,
   ) {
     const completed_at = yield* Clock.currentTimeMillis
-    const result = yield* SynchronizedRef.modify(state.jobs, (jobs): readonly [FinishResult, Map<string, Active>] => {
-      const job = jobs.get(id)
-      if (!job) return [{}, jobs]
-      if (job.token !== token) return [{}, jobs]
-      if (job.info.status !== "running") return [{ info: snapshot(job) }, jobs]
-      const pending = job.pending - 1
-      const output =
-        Exit.isSuccess(exit) && (!job.output || sequence > job.output.sequence)
-          ? { sequence, text: exit.value }
-          : job.output
-      if (Exit.isSuccess(exit) && pending > 0) {
-        return [{}, new Map(jobs).set(id, { ...job, pending, output })]
-      }
-      const status: Exclude<Status, "running"> = Exit.isSuccess(exit)
-        ? "completed"
-        : Cause.hasInterruptsOnly(exit.cause)
-          ? "cancelled"
-          : "error"
-      const next = {
-        ...job,
-        onPromote: undefined,
-        pending: 0,
-        output,
-        info: {
-          ...job.info,
+    const result = yield* SynchronizedRef.modifyEffect(
+      state.registry,
+      Effect.fnUntraced(function* (registry) {
+        const entry = registry.entries.get(id)
+        if (!entry || entry.kind !== "active") return [{} satisfies FinishResult, registry] as const
+        if (entry.token !== token) return [{} satisfies FinishResult, registry] as const
+
+        const pending = entry.pending - 1
+        const output =
+          Exit.isSuccess(exit) && (!entry.output || sequence > entry.output.sequence)
+            ? { sequence, text: exit.value }
+            : entry.output
+        if (Exit.isSuccess(exit) && pending > 0) {
+          return [
+            {} satisfies FinishResult,
+            { ...registry, entries: new Map(registry.entries).set(id, { ...entry, pending, output }) },
+          ] as const
+        }
+
+        const status: Exclude<Status, "running"> = Exit.isSuccess(exit)
+          ? "completed"
+          : Cause.hasInterruptsOnly(exit.cause)
+            ? "cancelled"
+            : "error"
+        const info: Info = {
+          ...entry.info,
           status,
           completed_at,
           ...(output ? { output: output.text } : {}),
           ...(Exit.isFailure(exit) ? { error: errorText(Cause.squash(exit.cause)) } : {}),
-        },
-      }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
-    })
-    if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
-    if (result.scope) {
-      yield* Scope.close(result.scope, Exit.void).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
-    }
+        }
+
+        yield* Deferred.succeed(entry.done, info).pipe(Effect.ignore)
+        yield* Deferred.succeed(entry.promoted, info).pipe(Effect.ignore)
+        yield* Scope.close(entry.scope, Exit.void).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
+
+        const retained = retainTerminal(registry, id, info, config, completed_at)
+        const finished: FinishResult = {
+          info: snapshot(info),
+          ...(retained.warning ? { warning: retained.warning } : {}),
+        }
+        return [finished, retained.registry] as const
+      }),
+    )
+    if (result.warning) yield* Effect.logWarning("background-job settlement pressure", result.warning)
     return result.info
   })
 
@@ -188,15 +380,15 @@ export const make = Effect.gen(function* () {
   })
 
   const list: Interface["list"] = Effect.fn("BackgroundJob.list")(function* () {
-    return Array.from((yield* SynchronizedRef.get(state.jobs)).values())
-      .map(snapshot)
+    return Array.from((yield* SynchronizedRef.get(state.registry)).entries.values())
+      .map(snapshotEntry)
       .toSorted((a, b) => a.started_at - b.started_at)
   })
 
   const get: Interface["get"] = Effect.fn("BackgroundJob.get")(function* (id) {
-    const job = (yield* SynchronizedRef.get(state.jobs)).get(id)
-    if (!job) return
-    return snapshot(job)
+    const entry = (yield* SynchronizedRef.get(state.registry)).entries.get(id)
+    if (!entry) return
+    return snapshotEntry(entry)
   })
 
   const start: Interface["start"] = Effect.fn("BackgroundJob.start")(function* (input) {
@@ -208,15 +400,16 @@ export const make = Effect.gen(function* () {
         const promoted = yield* Deferred.make<Info>()
         const tail = yield* Deferred.make<void>()
         const result = yield* SynchronizedRef.modifyEffect(
-          state.jobs,
+          state.registry,
           Effect.fnUntraced(function* (jobs) {
-            const existing = jobs.get(id)
-            if (existing?.info.status === "running") {
-              return [{ info: snapshot(existing) }, jobs] as readonly [StartResult, Map<string, Active>]
+            const existing = jobs.entries.get(id)
+            if (existing?.kind === "active") {
+              return [{ info: snapshot(existing.info) }, jobs] as readonly [StartResult, Registry]
             }
             const scope = yield* Scope.fork(state.scope, "parallel")
             const token = {}
-            const job = {
+            const job: Active = {
+              kind: "active",
               info: {
                 id,
                 type: input.type,
@@ -233,11 +426,9 @@ export const make = Effect.gen(function* () {
               tail,
               promoted,
               onPromote: input.onPromote,
+              waiters: 0,
             }
-            return [{ info: snapshot(job), scope, token }, new Map(jobs).set(id, job)] as readonly [
-              StartResult,
-              Map<string, Active>,
-            ]
+            return [{ info: snapshot(job.info), scope, token }, putEntry(jobs, id, job)] as readonly [StartResult, Registry]
           }),
         )
         if ("scope" in result)
@@ -258,18 +449,21 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const tail = yield* Deferred.make<void>()
         const result = yield* SynchronizedRef.modify(
-          state.jobs,
-          (jobs): readonly [ExtendResult, Map<string, Active>] => {
-            const job = jobs.get(input.id)
-            if (!job || job.info.status !== "running") return [{ extended: false }, jobs]
+          state.registry,
+          (jobs): readonly [ExtendResult, Registry] => {
+            const job = jobs.entries.get(input.id)
+            if (!job || job.kind !== "active") return [{ extended: false }, jobs]
             return [
               { extended: true, previous: job.tail, scope: job.scope, tail, token: job.token, sequence: job.next },
-              new Map(jobs).set(input.id, {
-                ...job,
-                pending: job.pending + 1,
-                next: job.next + 1,
-                tail,
-              }),
+              {
+                ...jobs,
+                entries: new Map(jobs.entries).set(input.id, {
+                  ...job,
+                  pending: job.pending + 1,
+                  next: job.next + 1,
+                  tail,
+                }),
+              },
             ]
           },
         )
@@ -290,32 +484,79 @@ export const make = Effect.gen(function* () {
   })
 
   const wait: Interface["wait"] = Effect.fn("BackgroundJob.wait")(function* (input) {
-    const job = (yield* SynchronizedRef.get(state.jobs)).get(input.id)
-    if (!job) return { timedOut: false }
-    if (job.info.status !== "running") return { info: snapshot(job), timedOut: false }
-    if (input.timeout === undefined) return { info: yield* Deferred.await(job.done), timedOut: false }
-    if (input.timeout <= 0) return { info: snapshot(job), timedOut: true }
-    const info = yield* Deferred.await(job.done).pipe(Effect.timeoutOption(input.timeout))
-    if (info._tag === "Some") return { info: info.value, timedOut: false }
-    return { info: snapshot(job), timedOut: true }
+    const reservation = yield* SynchronizedRef.modify(
+      state.registry,
+      (registry): readonly [WaitReservation, Registry] => {
+        const entry = registry.entries.get(input.id)
+        if (!entry) return [{ kind: "expired" }, registry]
+        if (entry.kind === "terminal") return [{ kind: "available", info: snapshot(entry.info), timedOut: false }, registry]
+        if (input.timeout !== undefined && input.timeout <= 0)
+          return [{ kind: "available", info: snapshot(entry.info), timedOut: true }, registry]
+        return [
+          { kind: "running", done: entry.done, token: entry.token },
+          {
+            ...registry,
+            waiters: registry.waiters + 1,
+            entries: new Map(registry.entries).set(input.id, { ...entry, waiters: entry.waiters + 1 }),
+          },
+        ]
+      },
+    )
+    if (reservation.kind === "expired") {
+      const expired: WaitResult = { status: "expired", timedOut: false }
+      return expired
+    }
+    if (reservation.kind === "available")
+      return { status: "available", info: reservation.info, timedOut: reservation.timedOut }
+
+    const decrement = SynchronizedRef.update(state.registry, (registry) => {
+      const entry = registry.entries.get(input.id)
+      return {
+        ...registry,
+        waiters: registry.waiters - 1,
+        ...(entry?.kind === "active" && entry.token === reservation.token
+          ? { entries: new Map(registry.entries).set(input.id, { ...entry, waiters: entry.waiters - 1 }) }
+          : {}),
+      }
+    })
+    const waited = input.timeout === undefined
+      ? Deferred.await(reservation.done).pipe(
+          Effect.map((info) => ({ status: "available" as const, info: snapshot(info), timedOut: false })),
+        )
+      : Deferred.await(reservation.done).pipe(
+          Effect.timeoutOption(input.timeout),
+          Effect.flatMap((info) => {
+            if (info._tag === "Some")
+              return Effect.succeed({ status: "available" as const, info: snapshot(info.value), timedOut: false })
+            return SynchronizedRef.get(state.registry).pipe(
+              Effect.map((registry) => {
+                const entry = registry.entries.get(input.id)
+                if (!entry) return { status: "expired" as const, timedOut: false as const }
+                return { status: "available" as const, info: snapshotEntry(entry), timedOut: true }
+              }),
+            )
+          }),
+        )
+    return yield* waited.pipe(Effect.ensuring(decrement))
   })
 
   const waitForPromotion: Interface["waitForPromotion"] = Effect.fn("BackgroundJob.waitForPromotion")(function* (id) {
-    const job = (yield* SynchronizedRef.get(state.jobs)).get(id)
-    if (!job || job.info.status !== "running") return yield* Effect.never
-    if (job.info.metadata?.background === true) return snapshot(job)
-    return yield* Deferred.await(job.promoted)
+    const entry = (yield* SynchronizedRef.get(state.registry)).entries.get(id)
+    if (!entry) return
+    if (entry.kind === "terminal") return snapshot(entry.info)
+    if (entry.info.metadata?.background === true) return snapshot(entry.info)
+    return yield* Deferred.await(entry.promoted).pipe(Effect.map(snapshot))
   })
 
   const promote: Interface["promote"] = Effect.fn("BackgroundJob.promote")(function* (id) {
     const result = yield* SynchronizedRef.modifyEffect(
-      state.jobs,
+      state.registry,
       Effect.fnUntraced(function* (jobs) {
-        const job = jobs.get(id)
-        if (!job || job.info.status !== "running") return [{}, jobs] as readonly [PromoteResult, Map<string, Active>]
+        const job = jobs.entries.get(id)
+        if (!job || job.kind !== "active") return [{} satisfies PromoteResult, jobs] as const
         if (job.info.metadata?.background === true)
-          return [{ info: snapshot(job) }, jobs] as readonly [PromoteResult, Map<string, Active>]
-        const next = {
+          return [{ info: snapshot(job.info) } satisfies PromoteResult, jobs] as const
+        const next: Active = {
           ...job,
           onPromote: undefined,
           info: {
@@ -323,41 +564,62 @@ export const make = Effect.gen(function* () {
             metadata: { ...job.info.metadata, background: true },
           },
         }
+        const info = snapshot(next.info)
+        yield* Deferred.succeed(job.promoted, info).pipe(Effect.ignore)
+        const promoted: PromoteResult = { info, onPromote: job.onPromote }
         return [
-          { info: snapshot(next), onPromote: job.onPromote, promoted: job.promoted },
-          new Map(jobs).set(id, next),
-        ] as readonly [PromoteResult, Map<string, Active>]
+          promoted,
+          { ...jobs, entries: new Map(jobs.entries).set(id, next) },
+        ] as readonly [PromoteResult, Registry]
       }),
     )
-    if (result.info && result.promoted) yield* Deferred.succeed(result.promoted, result.info).pipe(Effect.ignore)
     if (result.onPromote) yield* result.onPromote.pipe(Effect.ignore)
     return result.info
   })
 
   const cancel: Interface["cancel"] = Effect.fn("BackgroundJob.cancel")(function* (id) {
     const completed_at = yield* Clock.currentTimeMillis
-    const result = yield* SynchronizedRef.modify(state.jobs, (jobs): readonly [FinishResult, Map<string, Active>] => {
-      const job = jobs.get(id)
-      if (!job) return [{}, jobs]
-      if (job.info.status !== "running") return [{ info: snapshot(job) }, jobs]
-      const next = {
-        ...job,
-        onPromote: undefined,
-        pending: 0,
-        info: {
-          ...job.info,
-          status: "cancelled" as const,
-          completed_at,
-        },
-      }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
-    })
-    if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
-    if (result.scope) yield* Scope.close(result.scope, Exit.void)
+    const result = yield* SynchronizedRef.modifyEffect(
+      state.registry,
+      Effect.fnUntraced(function* (registry) {
+        const job = registry.entries.get(id)
+        if (!job) return [{} satisfies FinishResult, registry] as const
+        if (job.kind !== "active") return [{ info: snapshot(job.info) } satisfies FinishResult, registry] as const
+
+        const info: Info = { ...job.info, status: "cancelled", completed_at }
+        yield* Deferred.succeed(job.done, info).pipe(Effect.ignore)
+        yield* Deferred.succeed(job.promoted, info).pipe(Effect.ignore)
+        yield* Scope.close(job.scope, Exit.void).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
+
+        const retained = retainTerminal(registry, id, info, config, completed_at)
+        const finished: FinishResult = {
+          info: snapshot(info),
+          ...(retained.warning ? { warning: retained.warning } : {}),
+        }
+        return [finished, retained.registry] as const
+      }),
+    )
+    if (result.warning) yield* Effect.logWarning("background-job settlement pressure", result.warning)
     return result.info
   })
 
-  return Service.of({ list, get, start, extend, wait, waitForPromotion, promote, cancel })
+  // Instrumentation is intentionally available on make() for deterministic
+  // tests; the public instance adapter only exposes the runtime contract.
+  const inspect = Effect.fn("BackgroundJob.inspect")(function* () {
+    const registry = yield* SynchronizedRef.get(state.registry)
+    return {
+      entryCount: registry.entries.size,
+      runningCount: Array.from(registry.entries.values()).filter((entry) => entry.kind === "active").length,
+      settledCount: registry.settled.length,
+      settledOutputBytes: registry.settledOutputBytes,
+      evictions: registry.evictions,
+      outputStrips: registry.outputStrips,
+      waiters: registry.waiters,
+      settledResources: { deferreds: 0, scopes: 0, tokens: 0 },
+    } satisfies Inspection
+  })
+
+  return { ...Service.of({ list, get, start, extend, wait, waitForPromotion, promote, cancel }), inspect }
 })
 
 const layer = Layer.effect(Service, make)
