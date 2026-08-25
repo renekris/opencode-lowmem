@@ -3,7 +3,7 @@ export * as EventV2 from "./event"
 import { Cause, Context, Effect, Layer, Option, PubSub, Queue, Schema, Scope, Stream } from "effect"
 import { Event } from "@opencode-ai/schema/event"
 import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
-import { and, asc, eq, gt, inArray } from "drizzle-orm"
+import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm"
 import { Database } from "./database/database"
 import { EventSequenceTable, EventTable } from "./event/sql"
 import { Location } from "./location"
@@ -27,15 +27,12 @@ export const codecCache = new WeakMap<Definition, Codec>()
 
 const DURABLE_PAGE_ROWS = 100
 const DURABLE_PAGE_BYTES = 8 * 1024 * 1024
-const durablePageEncoder = new TextEncoder()
 
 type DurablePage = {
   readonly rows: Payload[]
   readonly lastSeq: number
   readonly hasMore: boolean
 }
-
-const serializedUtf8Bytes = (value: object) => durablePageEncoder.encode(JSON.stringify(value)).byteLength
 
 const getCodec = (definition: Definition): Codec => {
   const cached = codecCache.get(definition)
@@ -565,7 +562,10 @@ export const layerWith = (options?: LayerOptions) =>
         (options?.beforeAggregateRead?.(aggregateID) ?? Effect.void).pipe(
           Effect.andThen(
             db
-              .select()
+              .select({
+                seq: EventTable.seq,
+                bytes: sql<number>`length(CAST(${EventTable.data} AS BLOB))`,
+              })
               .from(EventTable)
               .where(and(eq(EventTable.aggregate_id, aggregateID), gt(EventTable.seq, after)))
               .orderBy(asc(EventTable.seq))
@@ -573,30 +573,55 @@ export const layerWith = (options?: LayerOptions) =>
               .all(),
           ),
           Effect.orDie,
-          Effect.map((rows) => {
-            const measured = rows.map((event) => {
-              const decoded = decodeSerializedEvent({
-                id: event.id,
-                aggregateID: event.aggregate_id,
-                seq: event.seq,
-                type: event.type,
-                data: event.data,
-              })
-              return { event: decoded, bytes: serializedUtf8Bytes(decoded) }
-            })
-            const page = new Array<Payload>()
+          Effect.flatMap((probes) => {
+            const selected = new Array<(typeof probes)[number]>()
             let pageBytes = 0
-            for (const [index, candidate] of measured.entries()) {
-              if (index > 0 && pageBytes + candidate.bytes > limitBytes) break
-              page.push(candidate.event)
-              pageBytes += candidate.bytes
-              if (page.length === limitRows) break
+            for (const probe of probes) {
+              if (selected.length > 0 && pageBytes + probe.bytes > limitBytes) break
+              selected.push(probe)
+              pageBytes += probe.bytes
+              if (selected.length === limitRows) break
             }
-            return {
-              rows: page,
-              lastSeq: page.at(-1)?.durable?.seq ?? after,
-              hasMore: page.length < measured.length,
-            }
+
+            const lastSeq = selected.at(-1)?.seq
+            if (lastSeq === undefined)
+              return Effect.succeed({
+                rows: [],
+                lastSeq: after,
+                hasMore: false,
+              } satisfies DurablePage)
+
+            return db
+              .select()
+              .from(EventTable)
+              .where(
+                and(
+                  eq(EventTable.aggregate_id, aggregateID),
+                  gt(EventTable.seq, after),
+                  lte(EventTable.seq, lastSeq),
+                ),
+              )
+              .orderBy(asc(EventTable.seq))
+              .all()
+              .pipe(
+                Effect.orDie,
+                Effect.map((rows) => {
+                  const page = rows.map((event) =>
+                    decodeSerializedEvent({
+                      id: event.id,
+                      aggregateID: event.aggregate_id,
+                      seq: event.seq,
+                      type: event.type,
+                      data: event.data,
+                    }),
+                  )
+                  return {
+                    rows: page,
+                    lastSeq: page.at(-1)?.durable?.seq ?? after,
+                    hasMore: selected.length < probes.length,
+                  }
+                }),
+              )
           }),
         )
 

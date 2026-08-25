@@ -72,6 +72,47 @@ describe("EventV2 durable paging", () => {
     }),
   )
 
+  it.effect("bounds decoded rows before applying the durable page byte limit", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const aggregateID = Session.ID.create()
+      const rowText = "x".repeat(2 * 1024 * 1024)
+
+      for (let index = 0; index < 60; index++) {
+        yield* events.publish(SessionEvent.ContextUpdated, {
+          sessionID: aggregateID,
+          messageID: SessionMessage.ID.make(`msg_large_${String(index).padStart(2, "0")}`),
+          timestamp: DateTime.makeUnsafe(0),
+          text: rowText,
+        })
+      }
+
+      const codec = EventV2.codecCache.get(SessionEvent.ContextUpdated)
+      if (!codec) throw new Error("Expected the durable event codec to be cached after publishing")
+      let decodedRows = 0
+      EventV2.codecCache.set(SessionEvent.ContextUpdated, {
+        encode: codec.encode,
+        decode: (input) => {
+          decodedRows++
+          return codec.decode(input)
+        },
+      })
+
+      const received = yield* Effect.gen(function* () {
+        return Array.from(yield* events.durable({ aggregateID }).pipe(Stream.take(3), Stream.runCollect))
+      }).pipe(Effect.ensuring(Effect.sync(() => EventV2.codecCache.set(SessionEvent.ContextUpdated, codec))))
+
+      const pageBytes = received.reduce(
+        (total, event) => total + new TextEncoder().encode(JSON.stringify(event.data)).byteLength,
+        0,
+      )
+      expect(received).toHaveLength(3)
+      expect(pageBytes).toBeLessThanOrEqual(8 * 1024 * 1024)
+      expect(decodedRows).toBe(received.length)
+      expect(decodedRows).toBeLessThan(60)
+    }),
+  )
+
   it.effect("includes events published while a historical page drain is in flight", () =>
     Effect.gen(function* () {
       let reads = 0
