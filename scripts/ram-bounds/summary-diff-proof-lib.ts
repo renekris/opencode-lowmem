@@ -19,7 +19,6 @@ export type RetainedCandidate = Candidate & { readonly snapshots: SnapshotRefs }
 export type CommandResult = { readonly code: number; readonly stdout: string; readonly stderr: string }
 
 export type CommandOptions = {
-  readonly input?: string
   readonly stdinFile?: string
   readonly stdoutFile?: string
   readonly stdoutCapBytes?: number

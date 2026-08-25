@@ -102,7 +102,7 @@ export async function createUnderCanonicalAncestor(lexical: string): Promise<str
 // pack-objects is killed the moment the pack crosses the remaining bound, so
 // a pathological pack can never land in full; the transient closure file is
 // charged against the same bound and the index file is post-checked.
-export type MaterializeResult = { readonly ok: true; readonly bytes: number } | { readonly ok: false; readonly reason: string }
+export type MaterializeResult = { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
 const closureCapBytes = 64 * 1024 * 1024
 
@@ -113,7 +113,7 @@ export async function materializeSnapshotObjects(input: {
   readonly runCommand: CommandRunner
 }): Promise<MaterializeResult> {
   const alternates = join(input.gitDir, "objects", "info", "alternates")
-  if (!(await pathExists(alternates))) return { ok: true, bytes: 0 }
+  if (!(await pathExists(alternates))) return { ok: true }
   const environment = { PATH: process.env.PATH ?? "" }
   const list = ["git", `--git-dir=${input.gitDir}`, "rev-list", "--objects", ...input.hashes]
   const closureFile = join(input.gitDir, "proof-closure.tmp")
@@ -160,19 +160,10 @@ export async function materializeSnapshotObjects(input: {
     await rm(alternates, { force: true })
     const verified = await input.runCommand(list, environment, { stdoutFile: closureFile, stdoutCapBytes: Math.min(closureCapBytes, input.limitBytes) })
     if (verified.code !== 0) return await refuse(`snapshot object closure does not resolve after materialization: ${verified.stderr.trim()}`)
-    return { ok: true, bytes }
+    return { ok: true }
   } finally {
     await rm(closureFile, { force: true })
   }
-}
-
-async function directoryBytes(directory: string): Promise<number> {
-  let total = 0
-  for (const entry of await readdir(directory)) {
-    const info = await lstat(join(directory, entry)).catch(() => undefined)
-    if (info?.isFile()) total += info.size
-  }
-  return total
 }
 
 function formatBytesOf(bytes: number): string {

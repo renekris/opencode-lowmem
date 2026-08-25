@@ -8,17 +8,12 @@ export async function runCommand(command: readonly string[], environment: Record
   const stdinFile = options.stdinFile !== undefined ? await open(options.stdinFile, "r") : undefined
   const child = Bun.spawn([...command], {
     env: environment,
-    stdin: options.input !== undefined ? "pipe" : stdinFile !== undefined ? stdinFile.fd : "ignore",
+    stdin: stdinFile !== undefined ? stdinFile.fd : "ignore",
     stdout: "pipe",
     stderr: "pipe",
   })
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const stdin = child.stdin
-    if (options.input !== undefined && stdin && typeof stdin !== "number") {
-      stdin.write(options.input)
-      await stdin.end()
-    }
     const collect = options.stdoutFile !== undefined ? captureToFile(child, options.stdoutFile, options.stdoutCapBytes) : captureToText(child.stdout, captureTextCapBytes)
     return await Promise.race([
       Promise.all([child.exited, collect, captureToText(child.stderr, captureTextCapBytes)]).then(([code, stdout, stderr]) => ({ code, stdout, stderr })),
