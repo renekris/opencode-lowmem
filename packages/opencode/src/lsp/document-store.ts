@@ -40,6 +40,7 @@ export type OpenEvent =
 export type OpenHandler = (event: OpenEvent) => Promise<void> | void
 
 export type Stats = {
+  readonly documentLimit: number
   readonly count: number
   readonly bytes: number
   readonly metadataOnly: number
@@ -84,6 +85,7 @@ export type Interface = {
   readonly touch: (path: string) => Promise<Document | undefined>
   readonly get: (path: string) => Document | undefined
   readonly has: (path: string) => boolean
+  readonly hasFull: (path: string) => boolean
   readonly isOversized: (text: string) => boolean
   readonly onEvict: (listener: EvictListener) => () => void
   readonly closeAll: () => Promise<void>
@@ -164,7 +166,7 @@ export function create(options: Options = {}): Interface {
       count++
       bytes += item.document.byteLength
     }
-    return { count, bytes, metadataOnly, openingCount, openingBytes }
+    return { documentLimit, count, bytes, metadataOnly, openingCount, openingBytes }
   }
   const evict = async (documentPath: string, item: StoredDocument) => {
     if (item.state === "evicting") return false
@@ -295,6 +297,10 @@ export function create(options: Options = {}): Interface {
     return item.document
   }
   const has = (documentPath: string) => documents.has(normalize(documentPath))
+  const hasFull = (documentPath: string) => {
+    const item = documents.get(normalize(documentPath))
+    return item?.state === "open" && item.document.metadataOnly === false
+  }
   const onEvict = (listener: EvictListener) => {
     listeners.add(listener)
     return () => listeners.delete(listener)
@@ -310,6 +316,7 @@ export function create(options: Options = {}): Interface {
     touch,
     get,
     has,
+    hasFull,
     isOversized,
     onEvict,
     closeAll,

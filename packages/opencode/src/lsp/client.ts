@@ -15,12 +15,17 @@ const DIAGNOSTICS_DEBOUNCE_MS = 150
 const DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS = 5_000
 const DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS = 10_000
 const DIAGNOSTICS_REQUEST_TIMEOUT_MS = 3_000
+const OVERSIZED_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3_000
 
 const INITIALIZE_TIMEOUT_MS = 45_000
 
 const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2
 
 export type Info = NonNullable<Awaited<ReturnType<typeof create>>>
+
+export type Stats = DocumentStore.Stats & {
+  readonly closedDocuments: number
+}
 
 export type Diagnostic = VSCodeDiagnostic
 
@@ -45,6 +50,10 @@ type DiagnosticRequestResult = {
   handled: boolean
   matched: boolean
   byFile: Map<string, Diagnostic[]>
+}
+
+type DocumentGeneration = {
+  readonly sequence: number
 }
 
 type CapabilityRegistration = {
@@ -145,18 +154,40 @@ export async function create(input: {
   const registrationListeners = new Set<() => void>()
   const diagnosticListeners = new Set<(input: { path: string; serverID: string }) => void>()
   const documentGenerationListeners = new Set<() => void>()
-  const closedDocuments = new Set<string>()
+  const closedDocuments = new Map<string, undefined>()
+  const documentGenerations = new Map<string, DocumentGeneration>()
+  let nextDocumentGeneration = 0
   const documents = DocumentStore.create()
+  const closedDocumentLimit = documents.stats().documentLimit
+  const beginDocumentGeneration = (documentPath: string) => {
+    const generation = { sequence: ++nextDocumentGeneration }
+    documentGenerations.set(documentPath, generation)
+    return generation
+  }
+  const rememberClosedDocument = (documentPath: string) => {
+    if (closedDocumentLimit <= 0) return
+    closedDocuments.delete(documentPath)
+    closedDocuments.set(documentPath, undefined)
+    while (closedDocuments.size > closedDocumentLimit) {
+      const oldest = closedDocuments.keys().next().value
+      if (oldest === undefined) return
+      closedDocuments.delete(oldest)
+    }
+  }
   documents.onEvict(async ({ path: documentPath }) => {
-    await connection.sendNotification("textDocument/didClose", {
-      textDocument: {
-        uri: pathToFileURL(documentPath).href,
-      },
-    })
+    documentGenerations.delete(documentPath)
+    const alreadyClosed = closedDocuments.delete(documentPath)
+    if (!alreadyClosed) {
+      await connection.sendNotification("textDocument/didClose", {
+        textDocument: {
+          uri: pathToFileURL(documentPath).href,
+        },
+      })
+    }
     pushDiagnostics.delete(documentPath)
     pullDiagnostics.delete(documentPath)
     published.delete(documentPath)
-    closedDocuments.add(documentPath)
+    rememberClosedDocument(documentPath)
     for (const listener of [...documentGenerationListeners]) listener()
   })
   const mergedDiagnostics = (filePath: string) =>
@@ -167,7 +198,7 @@ export async function create(input: {
     for (const listener of diagnosticListeners) listener({ path: filePath, serverID: input.serverID })
   }
   const updatePullDiagnostics = (filePath: string, next: Diagnostic[]) => {
-    if (closedDocuments.has(filePath)) return
+    if (!documents.hasFull(filePath)) return
     pullDiagnostics.set(filePath, next)
   }
   const emitRegistrationChange = () => {
@@ -302,7 +333,7 @@ export async function create(input: {
 
     if (matched && !merged.has(filePath)) merged.set(filePath, [])
     for (const [target, items] of merged.entries()) {
-      if (closedDocuments.has(target)) continue
+      if (!documents.hasFull(target)) continue
       updatePullDiagnostics(target, dedupeDiagnostics(items))
     }
 
@@ -586,6 +617,13 @@ export async function create(input: {
         )
         const extension = path.extname(normalizedPath)
         const languageId = LANGUAGE_EXTENSIONS[extension] ?? "plaintext"
+        let oversizedOpen:
+          | {
+              readonly version: number
+              readonly after: number
+              readonly generation: DocumentGeneration
+            }
+          | undefined
         const document = await documents.open(normalizedPath, () => readFile(normalizedPath), async (event) => {
           switch (event.kind) {
             case "change":
@@ -612,10 +650,12 @@ export async function create(input: {
                     : [{ text: event.text }],
               })
               return
-            case "open":
+            case "open": {
               closedDocuments.delete(normalizedPath)
               pushDiagnostics.delete(normalizedPath)
               pullDiagnostics.delete(normalizedPath)
+              const documentGeneration = beginDocumentGeneration(normalizedPath)
+              const diagnosticsStartedAt = Date.now()
               await connection.sendNotification("textDocument/didOpen", {
                 textDocument: {
                   uri: pathToFileURL(normalizedPath).href,
@@ -624,11 +664,36 @@ export async function create(input: {
                   text: event.text,
                 },
               })
+              if (event.document.metadataOnly)
+                oversizedOpen = {
+                  version: event.document.version,
+                  after: diagnosticsStartedAt,
+                  generation: documentGeneration,
+                }
               return
+            }
             default:
               return assertNever(event)
           }
         })
+        if (oversizedOpen) {
+          const pendingClose = oversizedOpen
+          void (async () => {
+            await waitForFreshPush({
+              path: normalizedPath,
+              version: pendingClose.version,
+              after: pendingClose.after,
+              timeout: OVERSIZED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+            })
+            if (documentGenerations.get(normalizedPath) !== pendingClose.generation) return
+            rememberClosedDocument(normalizedPath)
+            await connection.sendNotification("textDocument/didClose", {
+              textDocument: {
+                uri: pathToFileURL(normalizedPath).href,
+              },
+            })
+          })()
+        }
         return document.version
       },
     },
@@ -638,6 +703,9 @@ export async function create(input: {
         result.set(key, mergedDiagnostics(key))
       }
       return result
+    },
+    get documentStats(): Stats {
+      return { ...documents.stats(), closedDocuments: closedDocuments.size }
     },
     async waitForDiagnostics(request: { path: string; version: number; mode?: "document" | "full"; after?: number }) {
       const normalizedPath = Filesystem.normalizePath(

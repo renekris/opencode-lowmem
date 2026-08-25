@@ -12,6 +12,7 @@ let buffer = Buffer.alloc(0)
 let nextId = 1
 const events = []
 const openDocuments = new Map()
+const noDiagnostics = process.env.FAKE_LSP_NO_DIAGNOSTICS === "1"
 
 function encode(message) {
   const json = JSON.stringify(message)
@@ -67,11 +68,13 @@ function handle(message) {
   if (message.method === "textDocument/didOpen") {
     openDocuments.set(message.params.textDocument.uri, message.params.textDocument.text)
     events.push({ method: message.method, params: message.params })
-    notify("textDocument/publishDiagnostics", {
-      uri: message.params.textDocument.uri,
-      version: message.params.textDocument.version,
-      diagnostics: diagnosticsFor(message.params.textDocument.uri),
-    })
+    if (!noDiagnostics) {
+      notify("textDocument/publishDiagnostics", {
+        uri: message.params.textDocument.uri,
+        version: message.params.textDocument.version,
+        diagnostics: diagnosticsFor(message.params.textDocument.uri),
+      })
+    }
     return
   }
   if (message.method === "textDocument/didChange") {
@@ -126,6 +129,16 @@ function eventsFor(client: LSPClient.Info) {
   return client.connection.sendRequest<ServerEvent[]>("test/events", {})
 }
 
+async function waitForEventCount(client: LSPClient.Info, count: number) {
+  const startedAt = performance.now()
+  while (performance.now() - startedAt < 1_000) {
+    const events = await eventsFor(client)
+    if (events.length >= count) return events
+    await Bun.sleep(10)
+  }
+  throw new Error(`Timed out waiting for ${count} fake LSP events`)
+}
+
 async function withLimits<T>(values: Record<string, string>, action: () => Promise<T>) {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]))
   for (const [key, value] of Object.entries(values)) process.env[key] = value
@@ -139,9 +152,12 @@ async function withLimits<T>(values: Record<string, string>, action: () => Promi
   }
 }
 
-function spawnFakeServer(serverPath: string): LSPServer.Handle {
+function spawnFakeServer(serverPath: string, noDiagnostics = false): LSPServer.Handle {
   return {
-    process: spawn(process.execPath, [serverPath], { stdio: "pipe" }),
+    process: spawn(process.execPath, [serverPath], {
+      stdio: "pipe",
+      env: { ...process.env, FAKE_LSP_NO_DIAGNOSTICS: noDiagnostics ? "1" : "0" },
+    }),
   }
 }
 
@@ -240,6 +256,13 @@ describe("LSP document reopen behavior", () => {
             })
             const file = path.join(tmp.path, "large.ts")
             await client.notify.open({ path: file })
+            const initialEvents = await waitForEventCount(client, 2)
+            expect(initialEvents.map((event) => event.method)).toEqual([
+              "textDocument/didOpen",
+              "textDocument/didClose",
+            ])
+            expect(client.diagnostics.get(file)?.[0]?.message).toBe("analyzed:" + "x".repeat(2_049))
+
             await Bun.write(file, "small\n")
             await client.notify.open({ path: file })
             const events = await eventsFor(client)
@@ -252,6 +275,167 @@ describe("LSP document reopen behavior", () => {
             expect(events[0]?.params?.textDocument?.text).toHaveLength(2_049)
             expect(events[2]?.params?.textDocument?.text).toBe("small\n")
             expect(events.some((event) => event.method === "workspace/didChangeWatchedFiles")).toBe(false)
+            await client.shutdown()
+          },
+        }),
+    )
+  }, { timeout: 15_000 })
+
+  test("does not serialize a normal open behind an oversized no-push close", async () => {
+    await using tmp = await tmpdir({
+      init: async (directory) => {
+        const serverPath = path.join(directory, "fake-lsp-server.js")
+        await Bun.write(serverPath, SERVER)
+        await Bun.write(path.join(directory, "large.ts"), "x".repeat(2_049))
+        await Bun.write(path.join(directory, "normal.ts"), "normal\n")
+        return serverPath
+      },
+    })
+
+    await withLimits(
+      {
+        OPENCODE_LSP_DOC_LIMIT: "128",
+        OPENCODE_LSP_DOC_MAX_MB: "64MB",
+        OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB: "2KB",
+      },
+      async () =>
+        withTestInstance({
+          directory: tmp.path,
+          fn: async (ctx) => {
+            const client = await LSPClient.create({
+              serverID: "fake",
+              server: spawnFakeServer(tmp.extra, true),
+              root: tmp.path,
+              directory: tmp.path,
+              instance: ctx,
+            })
+            const large = path.join(tmp.path, "large.ts")
+            const normal = path.join(tmp.path, "normal.ts")
+
+            const oversizedOpening = client.notify.open({ path: large })
+            const startedAt = performance.now()
+            await client.notify.open({ path: normal })
+            expect(performance.now() - startedAt).toBeLessThan(2_500)
+
+            const beforeClose = await eventsFor(client)
+            expect(beforeClose.map((event) => event.method)).toEqual([
+              "textDocument/didOpen",
+              "textDocument/didOpen",
+            ])
+
+            await Bun.sleep(3_100)
+            await oversizedOpening
+            const afterClose = await eventsFor(client)
+            expect(afterClose.map((event) => event.method)).toEqual([
+              "textDocument/didOpen",
+              "textDocument/didOpen",
+              "textDocument/didClose",
+            ])
+
+            await Bun.write(large, "small\n")
+            await client.notify.open({ path: large })
+            const reopened = await eventsFor(client)
+            expect(reopened.map((event) => event.method)).toEqual([
+              "textDocument/didOpen",
+              "textDocument/didOpen",
+              "textDocument/didClose",
+              "textDocument/didOpen",
+            ])
+            expect(reopened.at(-1)?.params?.textDocument?.text).toBe("small\n")
+            await client.shutdown()
+          },
+        }),
+    )
+  }, { timeout: 15_000 })
+
+  test("discards a delayed oversized close after a fresh reopen", async () => {
+    await using tmp = await tmpdir({
+      init: async (directory) => {
+        const serverPath = path.join(directory, "fake-lsp-server.js")
+        await Bun.write(serverPath, SERVER)
+        await Bun.write(path.join(directory, "large.ts"), "x".repeat(2_049))
+        return serverPath
+      },
+    })
+
+    await withLimits(
+      {
+        OPENCODE_LSP_DOC_LIMIT: "128",
+        OPENCODE_LSP_DOC_MAX_MB: "64MB",
+        OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB: "2KB",
+      },
+      async () =>
+        withTestInstance({
+          directory: tmp.path,
+          fn: async (ctx) => {
+            const client = await LSPClient.create({
+              serverID: "fake",
+              server: spawnFakeServer(tmp.extra, true),
+              root: tmp.path,
+              directory: tmp.path,
+              instance: ctx,
+            })
+            const large = path.join(tmp.path, "large.ts")
+
+            const firstOpening = client.notify.open({ path: large })
+            const firstEvents = await waitForEventCount(client, 1)
+            expect(firstEvents.map((event) => event.method)).toEqual(["textDocument/didOpen"])
+
+            await Bun.write(large, "small\n")
+            const startedAt = performance.now()
+            await client.notify.open({ path: large })
+            expect(performance.now() - startedAt).toBeLessThan(2_500)
+            await firstOpening
+
+            await Bun.sleep(3_100)
+            const events = await eventsFor(client)
+            expect(events.map((event) => event.method)).toEqual([
+              "textDocument/didOpen",
+              "textDocument/didClose",
+              "textDocument/didOpen",
+            ])
+            expect(events.at(-1)?.params?.textDocument?.text).toBe("small\n")
+            await client.shutdown()
+          },
+        }),
+    )
+  }, { timeout: 15_000 })
+
+  test("bounds close tombstones during repeated LRU eviction", async () => {
+    await using tmp = await tmpdir({
+      init: async (directory) => {
+        const serverPath = path.join(directory, "fake-lsp-server.js")
+        await Bun.write(serverPath, SERVER)
+        for (const name of ["one.ts", "two.ts", "three.ts", "four.ts"]) {
+          await Bun.write(path.join(directory, name), name)
+        }
+        return serverPath
+      },
+    })
+
+    await withLimits(
+      {
+        OPENCODE_LSP_DOC_LIMIT: "2",
+        OPENCODE_LSP_DOC_MAX_MB: "64MB",
+        OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB: "2KB",
+      },
+      async () =>
+        withTestInstance({
+          directory: tmp.path,
+          fn: async (ctx) => {
+            const client = await LSPClient.create({
+              serverID: "fake",
+              server: spawnFakeServer(tmp.extra),
+              root: tmp.path,
+              directory: tmp.path,
+              instance: ctx,
+            })
+
+            for (const name of ["one.ts", "two.ts", "three.ts", "four.ts"]) {
+              await client.notify.open({ path: path.join(tmp.path, name) })
+            }
+
+            expect(client.documentStats.closedDocuments).toBeLessThanOrEqual(2)
             await client.shutdown()
           },
         }),

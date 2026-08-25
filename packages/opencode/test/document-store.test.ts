@@ -117,6 +117,7 @@ describe("DocumentStore", () => {
     expect(first).toMatchObject({ version: 0, byteLength: 6, metadataOnly: true })
     expect(first.metadataOnly).toBe(true)
     expect(store.stats()).toMatchObject({ count: 0, bytes: 0, metadataOnly: 1 })
+    expect(store.hasFull("/tmp/large.ts")).toBe(false)
 
     expect(await store.touch("/tmp/large.ts")).toBeUndefined()
     const reopened = await store.open("/tmp/large.ts", "ok", async (event) => {
@@ -124,6 +125,7 @@ describe("DocumentStore", () => {
     })
 
     expect(reopened).toMatchObject({ version: 0, text: "ok", metadataOnly: false })
+    expect(store.hasFull("/tmp/large.ts")).toBe(true)
     expect(events).toEqual([
       "open:0:123456",
       "close:/tmp/large.ts",
