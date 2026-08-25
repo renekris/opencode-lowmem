@@ -29,7 +29,7 @@ rewrite them) — find fork work with:
 
 ```bash
 git log --grep '(port of upstream #42150)'        # a specific port
-git log --oneline v1.18.21..HEAD -- <file-path>   # everything touching a seam
+git log --oneline v1.18.22..HEAD -- <file-path>   # everything touching a seam
 ```
 
 ## Ported upstream fixes (never merged upstream)
@@ -45,7 +45,8 @@ git log --oneline v1.18.21..HEAD -- <file-path>   # everything touching a seam
 | Honest SSE chunk timeout            | Server keepalive comments can't fake "data is flowing" during a stall; we add a multi-byte-split regression test                                                                                                                                                                    | [#43607](https://github.com/anomalyco/opencode/pull/43607) | **1052326311**            |
 | PartUpdated shallow copy            | Parts stop being deep-cloned on every publish — a top RAM driver in long sessions (issue [#35107](https://github.com/anomalyco/opencode/issues/35107) by **xingruodong-sys**; fix shape from closed [#43733](https://github.com/anomalyco/opencode/pull/43733) by **ColeLindfors**) | #35107 / #43733                                            | credited here             |
 | Idle status dedupe                  | Repeated "session is idle" writes stop re-broadcasting status events to every connected client — passive-CPU fix                                                                                                                                                                    | [#40984](https://github.com/anomalyco/opencode/pull/40984) | **zcxGGmu**               |
-| Durable event codec reuse           | Event codecs are compiled once per definition and cached instead of being rebuilt on every encode/decode — cuts CPU and allocation churn on the hot event path (129 M read syscalls observed on a 2.5 h session)                                                                     | [#43778](https://github.com/anomalyco/opencode/pull/43778) | app/opencode-agent\*       |
+| Durable event codec reuse           | Event codecs are compiled once per definition and cached instead of being rebuilt on every encode/decode — cuts CPU and allocation churn on the hot event path (129 M read syscalls observed on a 2.5 h session)                                                                     | [#43778](https://github.com/anomalyco/opencode/pull/43778) | opencode-agent[bot]\*      |
+| Database stats + vacuum subcommands (partial port) | Adds `opencode db stats [--json]` and `opencode db vacuum`; the stats implementation is a partial port of the upstream command shape, while this fork's offline vacuum guard is documented under customs below. Stats read a read-only immutable view of the main database file (no locks, no sidecar writes); page/table values exclude uncheckpointed WAL contents, which `wal_bytes` reports separately | [#43456](https://github.com/anomalyco/opencode/pull/43456) | **AndyS77** |
 
 Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped.
 \*AI-authored upstream PR; credited here in prose only.
@@ -61,8 +62,36 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 | TUI delta coalescing         | The UI-side twin of #42150: streamed chunks coalesce and apply every 120 ms instead of quadratic per-chunk store writes — for every session in the process, background subagents included                                                                                                                                          | `packages/tui/src/context/part-delta-buffer.ts`; authoritative part/message updates drop pending buffers                                 |
 | Deleted-session cleanup      | Deleting a session actually drops its message/part/diff/status/permission/question buckets from the UI store, tombstones the session so late events can't resurrect it, and a removed message drops its part bucket immediately (upstream [#12351](https://github.com/anomalyco/opencode/issues/12351), reported by **Limme-swe**) | `session.deleted`/`message.removed` handlers + tombstone gate in `packages/tui/src/context/sync.tsx`                                     |
 | Git subcommand classifier    | "Always allow" for `git -C ../worktree commit` stores `git commit *` — never junk, never a wider grant than you approved                                                                                                                                                                                                           | env/command unwrapping + git global-option skipping + scoped patterns                                                                    |
-| Payload byte+count budget    | TUI payload memory has a hard ceiling: when non-active session payloads exceed it, the least-recently-viewed ones drop (no auto-refetch); routing back rehydrates them. Streaming children keep working — their payloads drop only when non-active, and their status/permission events still flow. Permission prompts for evicted parts survive via a `toolInput` field carried on the permission event itself, so a prompt never needs its part payload resident | `packages/tui/src/context/payload-budget.ts`; knobs `OPENCODE_TUI_PAYLOAD_BUDGET_MB` (256), `OPENCODE_TUI_PAYLOAD_SESSION_LIMIT` (20), `OPENCODE_TUI_PART_INGRESS_MAX_KB` (256), `OPENCODE_TUI_DELTA_BUFFER_MAX_KB` (4096), `OPENCODE_TUI_DELTA_BUFFER_MAX_ENTRIES` (512), `OPENCODE_TUI_MIRROR_BUDGET_MB` (64), `OPENCODE_TUI_MIRROR_MSG_MAX_KB` (512), `OPENCODE_TUI_PERMISSION_ALLOWANCE_MB` (32; pending permission inputs truncate to dialog-visible markers per-entry above the allowance and when the map total exceeds 2x, and the stored request itself never retains `toolInput`); exact `"0"` disables each |
-| LSP document LRU             | Open LSP documents (full text kept for incremental sync) are evicted least-recently-used with an explicit `didClose` — bounded by both count and bytes, refresh reads one file at a time, and diagnostics for closed docs are discarded via generation tokens                                                                                                                                                                                              | `packages/opencode/src/lsp/document-store.ts`; knobs `OPENCODE_LSP_DOC_LIMIT` (128), `OPENCODE_LSP_DOC_MAX_MB` (64), `OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB` (32), `OPENCODE_LSP_OVERSIZED_LIMIT` (8; concurrent metadata-only records for oversized docs — the oldest is `didClose`d server-side beyond the cap, so server-side analysis state stays bounded too); oversized docs open transiently then keep metadata-only records; exact `"0"` disables |
+| Payload byte+count budget    | TUI payload memory has a hard ceiling: when non-active session payloads exceed it, the least-recently-viewed ones drop (no auto-refetch); routing back rehydrates them. Streaming children keep working — their payloads drop only when non-active, and their status/permission events still flow. Permission prompts for evicted parts survive via a `toolInput` field carried on the permission event itself, so a prompt never needs its part payload resident | `packages/tui/src/context/payload-budget.ts`; see the bound-knob inventory below. |
+| Durable event paging         | Durable aggregate replay reads two-phase byte+row bounded pages instead of materializing an unbounded tail                                                                                                                                                                                                                          | `packages/core/src/event.ts`; fixed page limits are 100 decoded rows and 8 MiB serialized UTF-8 bytes; no environment knobs. |
+| Background-job terminal ring | Settled background jobs retain a bounded terminal ring; oldest entries evict and output is stripped under byte pressure while active jobs remain protected                                                                                                                                                                                                                                      | `packages/core/src/background-job.ts`; see the bound-knob inventory below. |
+| Offline database vacuum guard | `opencode db vacuum` requires an exclusive lock and, on Linux, refuses when `/proc` finds another process holding the database or sidecars; the lock stays held across the guard commit and `VACUUM`                                                                                                                                                                                           | Fork-custom safety procedure around the partial #43456 command; `opencode db stats` uses a detached snapshot that excludes live WAL contents and reports `wal_bytes` separately. |
+| LSP document LRU             | Open LSP documents (full text kept for incremental sync) are evicted least-recently-used with an explicit `didClose` — bounded by both count and bytes, refresh reads one file at a time, and diagnostics for closed docs are discarded via generation tokens                                                                                                                                                                                              | `packages/opencode/src/lsp/document-store.ts`; see the bound-knob inventory below. |
+
+### Resource-bound knob inventory
+
+All knobs below use the source parser for their unit: byte limits require a `KB` or `MB` suffix and count limits are plain integers. The exact string `"0"` disables that individual bound. Durable event page limits are fixed constants, not environment knobs.
+
+| Area | Knob | Default | Bound |
+| ---- | ---- | ------- | ----- |
+| TUI payload | `OPENCODE_TUI_PAYLOAD_BUDGET_MB` | `256MB` | Total non-active payload bytes |
+| TUI payload | `OPENCODE_TUI_PAYLOAD_SESSION_LIMIT` | `20` | Retained non-active sessions |
+| TUI payload | `OPENCODE_TUI_ACTIVE_ALLOWANCE_MB` | `128MB` | Active-session payload allowance |
+| TUI payload | `OPENCODE_TUI_ACTIVE_PART_MAX_MB` | `32MB` | Per-part cap for active sessions (same-wave knob) |
+| TUI payload | `OPENCODE_TUI_PART_INGRESS_MAX_KB` | `256KB` | Per-part ingress bytes |
+| TUI delta buffer | `OPENCODE_TUI_DELTA_BUFFER_MAX_KB` | `4096KB` | Pending delta bytes |
+| TUI delta buffer | `OPENCODE_TUI_DELTA_BUFFER_MAX_ENTRIES` | `512` | Pending delta entries |
+| TUI mirror | `OPENCODE_TUI_MIRROR_BUDGET_MB` | `64MB` | Mirrored message bytes |
+| TUI mirror | `OPENCODE_TUI_MIRROR_MSG_MAX_KB` | `512KB` | Per-message mirrored bytes |
+| TUI mirror | `OPENCODE_TUI_MIRROR_SESSION_LIMIT` | `20` | Mirrored sessions |
+| TUI permissions | `OPENCODE_TUI_PERMISSION_ALLOWANCE_MB` | `32MB` | Pending permission-input bytes |
+| LSP documents | `OPENCODE_LSP_DOC_LIMIT` | `128` | Resident full-text documents |
+| LSP documents | `OPENCODE_LSP_DOC_MAX_MB` | `64MB` | Resident full-text bytes |
+| LSP documents | `OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB` | `32MB` | Single-document open allowance |
+| LSP documents | `OPENCODE_LSP_OVERSIZED_LIMIT` | `8` | Metadata-only oversized-document records |
+| Background jobs | `OPENCODE_BGJOB_SETTLED_MAX` | `100` | Settled terminal entries |
+| Background jobs | `OPENCODE_BGJOB_SETTLED_OUTPUT_MAX_MB` | `8MB` | Settled terminal output bytes |
+| Durable events | fixed `DURABLE_PAGE_ROWS` / `DURABLE_PAGE_BYTES` | `100` / `8 MiB` | Row and serialized-byte page caps; no env knobs |
 
 ## Deliberately NOT ported
 
@@ -145,20 +174,21 @@ is fork-owned files):
 (same empty-stream bug via new error type), #40142 (finish=length loop exit),
 #43302 (v2 sync engine — design-borrow only).
 
-**Deferred ports** (CPU winners, blocked on the next base bump): #43769
-(parallel-session snapshot scan CPU −77%; PR authored against the post-split
-`packages/ai`/`packages/util` tree that does not exist at v1.18.21) and
-#40698 (TUI syntax-highlight LRU cache; wraps `getTreeSitterClient().highlightOnce`,
-absent from our pinned `@opentui/core`). Verified 2026-08-24: both target
-shapes missing at this base; porting now would mean inventing seams upstream
+**Deferred ports**: #43769 (parallel-session snapshot scan CPU −77%; PR
+authored against the post-split `packages/ai`/`packages/util` tree that does
+not exist at v1.18.22 — re-verified 2026-08-25) and #40698 (TUI
+syntax-highlight LRU cache; wraps `getTreeSitterClient().highlightOnce`).
+Correction 2026-08-25: `highlightOnce` IS present in our pinned
+`@opentui/core` (`lib/tree-sitter/client.d.ts`) — the earlier absence claim
+was wrong. #40698 stays deferred for scope/priority (own behavior-preserving
+round), not for a missing seam; #43769 stays blocked until the base carries
+the post-split tree. Porting #43769 now would mean inventing seams upstream
 will replace. Already-merged perf PRs riding the next tag: #42826, #43292,
 #42346, #42579, #42741, #42952, #43191, #43158, #42467, #42458, #42468,
 #42972.
 
-**Backlog** (unclaimed, no upstream equivalent): LSP files LRU
-(`packages/opencode/src/lsp/client.ts` store is set-never-deleted);
-BackgroundJob settled-entry eviction (`packages/core/src/background-job.ts`);
-run-UI delta coalescing (`packages/opencode/src/cli/cmd/run/session-data.ts`
+**Backlog** (unclaimed, no upstream equivalent): run-UI delta coalescing
+(`packages/opencode/src/cli/cmd/run/session-data.ts`
 still concatenates and flushes per delta — changing it means changing footer
 render cadence, so it needs its own behavior-preserving round); serve-mode SSE
 event queue is unbounded (`handlers/event.ts`) — backpressure policy needed;
@@ -173,6 +203,6 @@ this fork just ships it.
 ## About upstream
 
 This fork builds on [opencode](https://github.com/anomalyco/opencode) — the open
-source AI coding agent, pinned at `v1.18.21`. See the
+source AI coding agent, pinned at `v1.18.22`. See the
 [upstream README](https://github.com/anomalyco/opencode/tree/dev#readme) for
 everything not fork-specific.

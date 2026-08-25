@@ -8,7 +8,7 @@
 #   3. Smoke-tests the linux-x64 binary's --version against the stamp.
 #   4. Tags the repo so the next build increments the round.
 #   5. Ensures ~/.opencode/bin/opencode execs this checkout's dist binary
-#      (writes the shim only if missing; never touches an existing one).
+#      (writes the shim only if missing; existing mismatches are a hard gate).
 #
 # It never kills running opencode sessions: sessions exec the binary at launch, so a
 # rebuild is picked up only by newly started sessions.
@@ -46,15 +46,32 @@ fi
 git tag "v${STAMP}"
 
 SHIM="${HOME}/.opencode/bin/opencode"
+# Deliberate out-of-band shim management may set this escape hatch to 1.
+ALLOW_SHIM_MISMATCH="${OPENCODE_FORK_BUILD_ALLOW_SHIM_MISMATCH:-0}"
 if [[ -f "${SHIM}" ]]; then
   echo "==> shim exists at ${SHIM} (left untouched)"
   if ! grep -qF "${BIN}" "${SHIM}"; then
-    echo "!! shim does not reference ${BIN} — review it manually" >&2
+    if [[ "${ALLOW_SHIM_MISMATCH}" != "1" ]]; then
+      echo "fork-build: shim does not reference ${BIN}; set OPENCODE_FORK_BUILD_ALLOW_SHIM_MISMATCH=1 only for deliberate out-of-band shim management" >&2
+      exit 1
+    fi
+    echo "!! shim does not reference ${BIN} — mismatch explicitly allowed"
   fi
 else
   mkdir -p "$(dirname "${SHIM}")"
   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "${BIN}" > "${SHIM}"
   chmod +x "${SHIM}"
   echo "==> wrote shim ${SHIM} -> ${BIN}"
+fi
+
+SHIM_OUT="$("${SHIM}" --version)"
+if [[ "${SHIM_OUT}" != "${STAMP}" ]]; then
+  if [[ "${ALLOW_SHIM_MISMATCH}" != "1" ]]; then
+    echo "fork-build: shim reports '${SHIM_OUT}', expected '${STAMP}'" >&2
+    exit 1
+  fi
+  echo "!! shim reports '${SHIM_OUT}', expected '${STAMP}' — mismatch explicitly allowed"
+else
+  echo "==> verified shim version ${SHIM_OUT}"
 fi
 echo "==> done: ${STAMP}"
