@@ -22,6 +22,9 @@ export type PayloadBudgetStats = {
   readonly evictions: number
   readonly truncations: number
   readonly permissionBytes: number
+  readonly permissionCount: number
+  readonly permissionStoreBytes: number
+  readonly questionStoreBytes: number
 }
 
 type PayloadBudgetOptions = {
@@ -30,6 +33,7 @@ type PayloadBudgetOptions = {
   readonly activeAllowanceBytes?: number
   readonly activePartMaxBytes?: number
   readonly permissionAllowanceBytes?: number
+  readonly permissionInputLimit?: number
   readonly partIngressBytes?: number
   readonly isProtected?: (sessionID: string) => boolean
   readonly isActive?: (sessionID: string) => boolean
@@ -58,6 +62,11 @@ function truncatePermissionInput(value: Record<string, unknown>, bytes: number):
   return Object.fromEntries(keys.map((key) => [key, marker]))
 }
 
+export function truncatedPermissionInput() {
+  const marker = "[payload omitted by lowmem budget]"
+  return Object.fromEntries([...permissionDisplayFields].map((key) => [key, marker]))
+}
+
 export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const budgetBytes = options.budgetBytes ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_BUDGET_MB", "256MB")
   const sessionLimit = options.sessionLimit ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_SESSION_LIMIT", "20", "count")
@@ -68,6 +77,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const permissionAllowanceBytes =
     options.permissionAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_PERMISSION_ALLOWANCE_MB", "32MB")
   const permissionMapAllowanceBytes = permissionAllowanceBytes * 2
+  const permissionInputLimit = options.permissionInputLimit ?? readEnvLimit("OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES", "512", "count")
   const partIngressBytes = options.partIngressBytes ?? readEnvLimit("OPENCODE_TUI_PART_INGRESS_MAX_KB", "256KB")
   const messages = new Map<string, StoredSize>()
   const parts = new Map<string, StoredSize>()
@@ -84,6 +94,9 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const permissionRequests = new Map<string, string>()
   const sessionPermissionKeys = new Map<string, Set<string>>()
   const truncatedParts = new Set<string>()
+  const deltaParts = new Set<string>()
+  const permissionStores = new Map<string, number>()
+  const questionStores = new Map<string, number>()
   let resident = new Map<string, number>()
   let evictableResident = 0
   let protectedResident = 0
@@ -164,6 +177,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     measuredBytes?: number,
   ) {
     const key = `${messageID}:${partID}`
+    deltaParts.delete(key)
     const previous = parts.get(key)
     if (previous) adjust(previous.sessionID, -previous.bytes)
     if (value === undefined) {
@@ -197,6 +211,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       parts.delete(key)
       partCallIDs.delete(key)
       truncatedParts.delete(key)
+      deltaParts.delete(key)
     }
     partSessions.delete(messageID)
     for (const part of values) replacePart(messageID, part.id, sessionID, part)
@@ -215,6 +230,14 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     refresh(sessionID)
   }
 
+  function replaceRequestStore(target: Map<string, number>, sessionID: string, value: unknown[] | undefined) {
+    if (value === undefined || value.length === 0) {
+      target.delete(sessionID)
+      return
+    }
+    target.set(sessionID, serializedUtf8Bytes(value))
+  }
+
   function removeParts(messageID: string) {
     const sessionID = [...parts].find(([key]) => key.startsWith(`${messageID}:`))?.[1].sessionID ?? pending.get(messageID)?.sessionID
     for (const [key, value] of parts) {
@@ -223,6 +246,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       parts.delete(key)
       partCallIDs.delete(key)
       truncatedParts.delete(key)
+      deltaParts.delete(key)
     }
     const pendingValue = pending.get(messageID)
     if (pendingValue) {
@@ -239,6 +263,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       adjust(sessionID, -value.bytes)
       messages.delete(messageID)
       for (const key of [...truncatedParts]) if (key.startsWith(`${messageID}:`)) truncatedParts.delete(key)
+      for (const key of [...deltaParts]) if (key.startsWith(`${messageID}:`)) deltaParts.delete(key)
     }
     for (const [key, value] of parts) {
       if (value.sessionID !== sessionID) continue
@@ -246,6 +271,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       parts.delete(key)
       partCallIDs.delete(key)
       truncatedParts.delete(key)
+      deltaParts.delete(key)
     }
     for (const [messageID, value] of pending) {
       if (value.sessionID !== sessionID) continue
@@ -255,7 +281,11 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     adjust(sessionID, -(todos.get(sessionID) ?? 0) + -(diffs.get(sessionID) ?? 0))
     todos.delete(sessionID)
     diffs.delete(sessionID)
-    clearPermissionSession(sessionID)
+    if (input.evicted !== true) {
+      clearPermissionSession(sessionID)
+      permissionStores.delete(sessionID)
+      questionStores.delete(sessionID)
+    }
     partSessions.forEach((value, key) => value === sessionID && partSessions.delete(key))
     sessions.delete(sessionID)
     resident.delete(sessionID)
@@ -297,6 +327,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       parts.delete(key)
       partCallIDs.delete(key)
       truncatedParts.delete(key)
+      deltaParts.delete(key)
     }
     for (const [messageID, value] of pending) {
       if (value.sessionID !== sessionID) continue
@@ -328,6 +359,14 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       return
     }
     for (const key of [...truncatedParts]) if (key.startsWith(`${messageID}:`)) truncatedParts.delete(key)
+  }
+
+  function clearDeltaParts(messageID: string, partID?: string) {
+    if (partID !== undefined) {
+      deltaParts.delete(`${messageID}:${partID}`)
+      return
+    }
+    for (const key of [...deltaParts]) if (key.startsWith(`${messageID}:`)) deltaParts.delete(key)
   }
 
   function preparePart(sessionID: string, part: Part) {
@@ -417,12 +456,34 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       permissionAllowanceBytes > 0 &&
       (bytes > permissionAllowanceBytes || permissionBytes + bytes > permissionMapAllowanceBytes)
     const storedValue = truncate ? truncatePermissionInput(value, bytes) : value
+    const storedBytes = serializedUtf8Bytes(storedValue)
+    let overCount = permissionInputLimit > 0 && permissionInputs.size >= permissionInputLimit
+    let overBytes = permissionMapAllowanceBytes > 0 && permissionBytes + storedBytes > permissionMapAllowanceBytes
+    if (overCount || overBytes) {
+      // Pressure evicts the oldest stored inputs from other sessions first;
+      // the prompting session's entries are never dropped. When every entry
+      // belongs to it, the new input is refused and the prompt renders its
+      // truncation marker instead (see routes/session/permission.tsx).
+      for (const [existingKey, entry] of permissionInputs) {
+        if (!overCount && !overBytes) break
+        if (entry.sessionID === sessionID) continue
+        clearPermissionKey(existingKey)
+        overCount = permissionInputLimit > 0 && permissionInputs.size >= permissionInputLimit
+        overBytes = permissionMapAllowanceBytes > 0 && permissionBytes + storedBytes > permissionMapAllowanceBytes
+      }
+    }
+    if (overCount || overBytes) {
+      truncations++
+      warnPressure(sessionID, true)
+      refresh(sessionID)
+      return
+    }
     permissionInputs.set(key, { sessionID, requestKey, value: storedValue })
     permissionRequests.set(requestKey, key)
     const keys = sessionPermissionKeys.get(sessionID) ?? new Set<string>()
     keys.add(key)
     sessionPermissionKeys.set(sessionID, keys)
-    permissionBytes += serializedUtf8Bytes(storedValue)
+    permissionBytes += storedBytes
     if (truncate) {
       truncations++
       warnPressure(sessionID, true)
@@ -466,6 +527,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       activePartMaxBytes,
       permissionAllowanceBytes,
       permissionMapAllowanceBytes,
+      permissionInputLimit,
       partIngressBytes,
     },
     replaceMessage,
@@ -477,6 +539,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     removeMessage: (sessionID: string, messageID: string) => {
       replaceMessage(sessionID, messageID, undefined)
       clearTruncated(messageID)
+      clearDeltaParts(messageID)
       clearPermissionForMessage(messageID)
     },
     removePart: (messageID: string, partID: string) => {
@@ -485,6 +548,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       const callID = partCallIDs.get(key)
       if (sessionID) replacePart(messageID, partID, sessionID, undefined)
       clearTruncated(messageID, partID)
+      clearDeltaParts(messageID, partID)
       if (callID !== undefined) clearPermissionKey(permissionKey(messageID, callID))
     },
     removeParts,
@@ -492,11 +556,17 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     replacePendingDelta,
     preparePart,
     isTruncated: (messageID: string, partID: string) => truncatedParts.has(`${messageID}:${partID}`),
+    markDeltaPart: (messageID: string, partID: string) => deltaParts.add(`${messageID}:${partID}`),
+    hasDeltaPart: (messageID: string, partID: string) => deltaParts.has(`${messageID}:${partID}`),
     setPermissionInput,
     permissionInput: (messageID: string, callID: string) => permissionInputs.get(permissionKey(messageID, callID))?.value,
     clearPermissionRequest,
     clearPermissionForMessage,
     clearPermissionSession,
+    replacePermissionRequests: (sessionID: string, value: unknown[] | undefined) =>
+      replaceRequestStore(permissionStores, sessionID, value),
+    replaceQuestionRequests: (sessionID: string, value: unknown[] | undefined) =>
+      replaceRequestStore(questionStores, sessionID, value),
     messageIDs: (sessionID: string) => {
       const result = new Set<string>()
       for (const [messageID, value] of messages) if (value.sessionID === sessionID) result.add(messageID)
@@ -518,6 +588,9 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       evictions,
       truncations,
       permissionBytes,
+      permissionCount: permissionInputs.size,
+      permissionStoreBytes: [...permissionStores.values()].reduce((total, bytes) => total + bytes, 0),
+      questionStoreBytes: [...questionStores.values()].reduce((total, bytes) => total + bytes, 0),
     }),
   }
 }

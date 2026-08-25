@@ -150,3 +150,56 @@ test("hydration preserves a delta buffered before sync starts", async () => {
     app.renderer.destroy()
   }
 })
+
+test("hydration preserves a pre-sync flushed delta over nonempty stale server text", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  let resolveMessages!: (response: Response) => void
+  const messages = new Promise<Response>((resolve) => {
+    resolveMessages = resolve
+  })
+  let requested = false
+  const { app, emit, sync } = await mount((url) => {
+    if (url.pathname === `/session/${sessionID}`) return json(session)
+    if (url.pathname === `/session/${sessionID}/message`) {
+      requested = true
+      return messages
+    }
+    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
+    return undefined
+  }, tmp.path)
+
+  try {
+    emit(global({ id: "evt_message_flushed", type: "message.updated", properties: { sessionID, info: assistant } }))
+    emit(
+      global({
+        id: "evt_part_flushed",
+        type: "message.part.updated",
+        properties: {
+          sessionID,
+          time: 1,
+          part: { id: partID, sessionID, messageID, type: "text", text: "base" },
+        },
+      }),
+    )
+    await wait(() => sync.data.part[messageID]?.[0]?.type === "text")
+    emit(
+      global({
+        id: "evt_delta_flushed",
+        type: "message.part.delta",
+        properties: { sessionID, messageID, partID, field: "text", delta: " local delta" },
+      }),
+    )
+    await wait(() => sync.data.part[messageID]?.[0]?.type === "text" && sync.data.part[messageID]?.[0]?.text === "base local delta")
+
+    const hydrate = sync.session.sync(sessionID)
+    await wait(() => requested)
+    resolveMessages(json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "stale server text" }] }]))
+    await hydrate
+
+    expect(sync.data.part[messageID]?.[0]).toMatchObject({ text: "base local delta" })
+  } finally {
+    app.renderer.destroy()
+  }
+})

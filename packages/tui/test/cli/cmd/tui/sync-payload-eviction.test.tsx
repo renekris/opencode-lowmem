@@ -231,6 +231,105 @@ test("pending permission toolInput is bounded, not retained in the store", async
   }
 })
 
+test("evicted pending permissions retain their dialog tool input until reply", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_permission_evict", 20)
+    const sessionID = ids.at(0)
+    if (sessionID === undefined) throw new Error("expected seeded session")
+    const messageID = `msg_${sessionID}_0`
+    await wait(() => ids.every((id) => sync.data.message[id]?.length === 1))
+
+    emit(
+      global({
+        id: "evt_permission_evict",
+        type: "permission.asked",
+        properties: {
+          id: "per_evict",
+          sessionID,
+          permission: "bash",
+          patterns: [],
+          metadata: {},
+          always: [],
+          tool: { messageID, callID: "call_evict" },
+          toolInput: { command: "echo retained" },
+        },
+      }),
+    )
+    pushExtra(emit, "permission_evict")
+    await wait(() => sync.data.message[sessionID] === undefined)
+
+    expect(sync.data.permission[sessionID]?.[0]?.toolInput).toBeUndefined()
+    expect(sync.session.permissionInput(messageID, "call_evict")).toEqual({ command: "echo retained" })
+
+    emit(
+      global({
+        id: "evt_permission_evict_reply",
+        type: "permission.replied",
+        properties: { sessionID, requestID: "per_evict", reply: "once" },
+      }),
+    )
+    await wait(() => sync.data.permission[sessionID]?.length === 0)
+    expect(sync.session.permissionInput(messageID, "call_evict")).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("accounts outstanding permission and question request stores", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const ids = await seed(emit, "ses_request_accounting", 1)
+    const sessionID = ids.at(0)
+    if (sessionID === undefined) throw new Error("expected seeded session")
+    emit(
+      global({
+        id: "evt_permission_accounting",
+        type: "permission.asked",
+        properties: { id: "per_accounting", sessionID, permission: "bash", patterns: [], metadata: {}, always: [] },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_question_accounting",
+        type: "question.asked",
+        properties: { id: "question_accounting", sessionID, questions: [] },
+      }),
+    )
+    await wait(() => sync.data.permission[sessionID]?.length === 1 && sync.data.question[sessionID]?.length === 1)
+
+    expect(sync.payload.stats().permissionStoreBytes).toBeGreaterThan(0)
+    expect(sync.payload.stats().questionStoreBytes).toBeGreaterThan(0)
+
+    emit(
+      global({
+        id: "evt_permission_accounting_reply",
+        type: "permission.replied",
+        properties: { sessionID, requestID: "per_accounting", reply: "once" },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_question_accounting_reply",
+        type: "question.replied",
+        properties: { sessionID, requestID: "question_accounting", answers: [] },
+      }),
+    )
+    await wait(() => sync.data.permission[sessionID]?.length === 0 && sync.data.question[sessionID]?.length === 0)
+
+    expect(sync.payload.stats().permissionStoreBytes).toBe(0)
+    expect(sync.payload.stats().questionStoreBytes).toBe(0)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("orphan part updates do not resurrect evicted sessions", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")

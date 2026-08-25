@@ -39,6 +39,7 @@ import { isRecord } from "../util/record"
 
 type PermissionRequestWithToolInput = PermissionRequest & {
   toolInput?: Record<string, unknown>
+  toolInputBounded?: boolean
 }
 
 const emptyConsoleState: ConsoleState = {
@@ -171,6 +172,9 @@ export const {
       hydratingSessions,
     })
     const payloadBudget = payloadEviction.budget
+    const trackPermissionRequests = (sessionID: string) =>
+      payloadBudget.replacePermissionRequests(sessionID, store.permission[sessionID])
+    const trackQuestionRequests = (sessionID: string) => payloadBudget.replaceQuestionRequests(sessionID, store.question[sessionID])
     const partDeltaBuffer = createPartDeltaBuffer({
       apply: ({ messageID, partID, field, accumulated }) => {
         try {
@@ -194,6 +198,7 @@ export const {
           const prepared = payloadBudget.preparePart(updated.sessionID, updated)
           if (prepared.part !== updated) setStore("part", messageID, result.index, prepared.part)
           payloadBudget.replacePart(messageID, prepared.part.id, prepared.part.sessionID, prepared.part, prepared.measuredBytes)
+          payloadBudget.markDeltaPart(messageID, prepared.part.id)
         } finally {
           payloadEviction.compact()
         }
@@ -248,20 +253,13 @@ export const {
               draft.splice(match.index, 1)
             }),
           )
+          trackPermissionRequests(event.properties.sessionID)
           payloadEviction.compact()
           break
         }
 
         case "permission.asked": {
           const request: PermissionRequestWithToolInput = event.properties
-          if (request.tool !== undefined && request.toolInput !== undefined)
-            payloadBudget.setPermissionInput(
-              request.sessionID,
-              request.id,
-              request.tool.messageID,
-              request.tool.callID,
-              request.toolInput,
-            )
           if (permission.mode === "auto") {
             void sdk.client.permission.reply({
               requestID: request.id,
@@ -271,18 +269,28 @@ export const {
             })
             break
           }
+          if (request.tool !== undefined && request.toolInput !== undefined)
+            payloadBudget.setPermissionInput(
+              request.sessionID,
+              request.id,
+              request.tool.messageID,
+              request.tool.callID,
+              request.toolInput,
+            )
           // toolInput lives only in the bounded payload-budget map; the store copy
           // must not retain the full payload for the outstanding permission's lifetime.
           const stored: PermissionRequestWithToolInput =
-            request.toolInput === undefined ? request : { ...request, toolInput: undefined }
+            request.toolInput === undefined ? request : { ...request, toolInput: undefined, toolInputBounded: true }
           const requests = store.permission[request.sessionID]
           if (!requests) {
             setStore("permission", request.sessionID, [stored])
+            trackPermissionRequests(request.sessionID)
             break
           }
           const match = search(requests, request.id, (r) => r.id)
           if (match.found) {
             setStore("permission", request.sessionID, match.index, reconcile(stored))
+            trackPermissionRequests(request.sessionID)
             break
           }
           setStore(
@@ -292,6 +300,7 @@ export const {
               draft.splice(match.index, 0, stored)
             }),
           )
+          trackPermissionRequests(request.sessionID)
           break
         }
 
@@ -308,6 +317,7 @@ export const {
               draft.splice(match.index, 1)
             }),
           )
+          trackQuestionRequests(event.properties.sessionID)
           payloadEviction.compact()
           break
         }
@@ -317,11 +327,13 @@ export const {
           const requests = store.question[request.sessionID]
           if (!requests) {
             setStore("question", request.sessionID, [request])
+            trackQuestionRequests(request.sessionID)
             break
           }
           const match = search(requests, request.id, (r) => r.id)
           if (match.found) {
             setStore("question", request.sessionID, match.index, reconcile(request))
+            trackQuestionRequests(request.sessionID)
             break
           }
           setStore(
@@ -331,6 +343,7 @@ export const {
               draft.splice(match.index, 0, request)
             }),
           )
+          trackQuestionRequests(request.sessionID)
           break
         }
 
@@ -782,7 +795,8 @@ export const {
                     const currentParts = draft.part[message.info.id] ?? []
                     const parts = message.parts.flatMap((part) => {
                       const current = currentParts.find((item) => item.id === part.id)
-                      if (tracker.parts.has(part.id)) return current ? [current] : []
+                      if (tracker.parts.has(part.id) || payloadBudget.hasDeltaPart(message.info.id, part.id))
+                        return current ? [current] : []
                       if (
                         current &&
                         (part.type === "text" || part.type === "reasoning") &&

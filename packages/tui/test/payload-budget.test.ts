@@ -190,18 +190,71 @@ describe("payload budget", () => {
     expect(budget.stats().permissionBytes).toBeLessThanOrEqual(2000)
   })
 
-  test("exact zero keeps permission inputs unbounded", () => {
-    const budget = createPayloadBudget({ permissionAllowanceBytes: 0 })
-    const input = { filePath: "/" + "x".repeat(256) }
+  test("caps permission input entries while retaining earlier pending inputs", () => {
+    const countName = "OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES"
+    const allowanceName = "OPENCODE_TUI_PERMISSION_ALLOWANCE_MB"
+    const previousCount = process.env[countName]
+    const previousAllowance = process.env[allowanceName]
+    process.env[countName] = "2"
+    process.env[allowanceName] = "0"
 
-    for (let index = 0; index < 257; index++) {
-      budget.setPermissionInput("ses_permission", `per_${index}`, "msg_permission", `call_${index}`, input)
+    try {
+      const budget = createPayloadBudget()
+      budget.setPermissionInput("ses_permission_cap", "per_1", "msg_permission_cap", "call_1", { command: "one" })
+      budget.setPermissionInput("ses_permission_cap", "per_2", "msg_permission_cap", "call_2", { command: "two" })
+      budget.setPermissionInput("ses_permission_cap", "per_3", "msg_permission_cap", "call_3", { command: "three" })
+
+      expect(budget.stats().permissionCount).toBe(2)
+      expect(budget.permissionInput("msg_permission_cap", "call_1")).toEqual({ command: "one" })
+      expect(budget.permissionInput("msg_permission_cap", "call_2")).toEqual({ command: "two" })
+      expect(budget.permissionInput("msg_permission_cap", "call_3")).toBeUndefined()
+    } finally {
+      if (previousCount === undefined) delete process.env[countName]
+      else process.env[countName] = previousCount
+      if (previousAllowance === undefined) delete process.env[allowanceName]
+      else process.env[allowanceName] = previousAllowance
     }
+  })
 
-    expect(budget.permissionInput("msg_permission", "call_0")).toEqual(input)
-    expect(budget.stats().permissionBytes).toBe(257 * serializedUtf8Bytes(input))
-    for (let index = 0; index < 257; index++) budget.clearPermissionRequest("ses_permission", `per_${index}`)
-    expect(budget.stats().permissionBytes).toBe(0)
+  test("hard caps permission marker bytes without evicting an existing pending input", () => {
+    const budget = createPayloadBudget({ permissionAllowanceBytes: 64 })
+    budget.setPermissionInput("ses_permission_bytes", "per_small", "msg_permission_bytes", "call_small", {
+      command: "keep",
+    })
+    budget.setPermissionInput("ses_permission_bytes", "per_large_1", "msg_permission_bytes", "call_large_1", {
+      command: "x".repeat(256),
+    })
+    budget.setPermissionInput("ses_permission_bytes", "per_large_2", "msg_permission_bytes", "call_large_2", {
+      command: "y".repeat(256),
+    })
+
+    expect(budget.stats().permissionBytes).toBeLessThanOrEqual(128)
+    expect(budget.permissionInput("msg_permission_bytes", "call_small")).toEqual({ command: "keep" })
+    expect(budget.permissionInput("msg_permission_bytes", "call_large_1")?.command).toContain("payload omitted")
+    expect(budget.permissionInput("msg_permission_bytes", "call_large_2")).toBeUndefined()
+  })
+
+  test("exact zero keeps permission inputs unbounded", () => {
+    const name = "OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES"
+    const previous = process.env[name]
+    process.env[name] = "0"
+
+    try {
+      const budget = createPayloadBudget({ permissionAllowanceBytes: 0 })
+      const input = { filePath: "/" + "x".repeat(256) }
+
+      for (let index = 0; index < 257; index++) {
+        budget.setPermissionInput("ses_permission", `per_${index}`, "msg_permission", `call_${index}`, input)
+      }
+
+      expect(budget.permissionInput("msg_permission", "call_0")).toEqual(input)
+      expect(budget.stats().permissionBytes).toBe(257 * serializedUtf8Bytes(input))
+      for (let index = 0; index < 257; index++) budget.clearPermissionRequest("ses_permission", `per_${index}`)
+      expect(budget.stats().permissionBytes).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env[name]
+      else process.env[name] = previous
+    }
   })
 
   test("removing one tool part clears only its permission input", () => {
@@ -325,6 +378,40 @@ describe("payload budget", () => {
     buffer.dropMessage("msg_2")
     expect(buffer.pendingBytes()).toBe(0)
     expect(buffer.pendingCount()).toBe(0)
+  })
+
+  test("authoritative part replacement clears the flushed-delta marker", () => {
+    const budget = createPayloadBudget()
+    const part = { id: "prt_1", sessionID: "ses_1", messageID: "msg_1", type: "text", text: "streamed" } as Part
+
+    budget.replacePart("msg_1", "prt_1", "ses_1", part)
+    budget.markDeltaPart("msg_1", "prt_1")
+    expect(budget.hasDeltaPart("msg_1", "prt_1")).toBe(true)
+
+    budget.replacePart("msg_1", "prt_1", "ses_1", { ...part, text: "authoritative" } as Part)
+    expect(budget.hasDeltaPart("msg_1", "prt_1")).toBe(false)
+  })
+
+  test("permission input pressure evicts other sessions before refusing", () => {
+    const budget = createPayloadBudget({ permissionInputLimit: 2, permissionAllowanceBytes: 1024 * 1024 })
+
+    budget.setPermissionInput("ses_a", "per_1", "msg_1", "call_1", { filePath: "a" })
+    budget.setPermissionInput("ses_b", "per_2", "msg_2", "call_2", { filePath: "b" })
+    budget.setPermissionInput("ses_active", "per_3", "msg_3", "call_3", { filePath: "c" })
+
+    expect(budget.permissionInput("msg_1", "call_1")).toBeUndefined()
+    expect(budget.permissionInput("msg_2", "call_2")).toEqual({ filePath: "b" })
+    expect(budget.permissionInput("msg_3", "call_3")).toEqual({ filePath: "c" })
+  })
+
+  test("permission input pressure refuses rather than dropping the prompting session's entries", () => {
+    const budget = createPayloadBudget({ permissionInputLimit: 1, permissionAllowanceBytes: 1024 * 1024 })
+
+    budget.setPermissionInput("ses_a", "per_1", "msg_1", "call_1", { filePath: "a" })
+    budget.setPermissionInput("ses_a", "per_2", "msg_2", "call_2", { filePath: "second" })
+
+    expect(budget.permissionInput("msg_1", "call_1")).toEqual({ filePath: "a" })
+    expect(budget.permissionInput("msg_2", "call_2")).toBeUndefined()
   })
 
 })

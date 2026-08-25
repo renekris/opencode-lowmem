@@ -8,6 +8,7 @@ import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
 import { SplitBorder } from "../../ui/border"
 import { useSync } from "../../context/sync"
+import { truncatedPermissionInput } from "../../context/payload-budget"
 import { useProject } from "../../context/project"
 import { filetype } from "../../util/filetype"
 import { Locale } from "../../util/locale"
@@ -18,6 +19,11 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut } from "../../keyma
 import { usePathFormatter } from "../../context/path-format"
 
 type PermissionStage = "permission" | "always" | "reject"
+type PermissionRequestWithBoundedInput = PermissionRequest & {
+  readonly toolInput?: Record<string, unknown>
+  readonly toolInputBounded?: boolean
+}
+
 function EditBody(props: { request: PermissionRequest }) {
   const themeState = useTheme()
   const theme = themeState.theme
@@ -107,7 +113,7 @@ function TextBody(props: { title: string; description?: string; icon?: string })
   )
 }
 
-export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
+export function PermissionPrompt(props: { request: PermissionRequestWithBoundedInput; directory?: string }) {
   const sdk = useSDK()
   const project = useProject()
   const sync = useSync()
@@ -127,7 +133,11 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
         return part.state.input ?? {}
       }
     }
-    return sync.session.permissionInput(tool.messageID, tool.callID) ?? props.request.toolInput ?? {}
+    return (
+      sync.session.permissionInput(tool.messageID, tool.callID) ??
+      props.request.toolInput ??
+      (props.request.toolInputBounded ? truncatedPermissionInput() : {})
+    )
   })
 
   const { theme } = useTheme()
