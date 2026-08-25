@@ -198,9 +198,14 @@ export async function create(input: {
     for (const listener of diagnosticListeners) listener({ path: filePath, serverID: input.serverID })
   }
   const updatePullDiagnostics = (filePath: string, next: Diagnostic[]) => {
-    if (!documents.hasFull(filePath)) return
+    if (skipsPullDiagnostics(filePath)) return
     pullDiagnostics.set(filePath, next)
   }
+  // Pull results cover files the server knows about, including never-opened
+  // workspace files; only server-side-closed documents (tombstoned evictions
+  // and metadata-only oversized entries) must not receive stale results.
+  const skipsPullDiagnostics = (filePath: string) =>
+    closedDocuments.has(filePath) || (documents.has(filePath) && !documents.hasFull(filePath))
   const emitRegistrationChange = () => {
     for (const listener of [...registrationListeners]) listener()
   }
@@ -333,7 +338,7 @@ export async function create(input: {
 
     if (matched && !merged.has(filePath)) merged.set(filePath, [])
     for (const [target, items] of merged.entries()) {
-      if (!documents.hasFull(target)) continue
+      if (skipsPullDiagnostics(target)) continue
       updatePullDiagnostics(target, dedupeDiagnostics(items))
     }
 
