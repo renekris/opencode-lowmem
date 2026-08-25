@@ -25,6 +25,18 @@ export type Codec = {
 
 export const codecCache = new WeakMap<Definition, Codec>()
 
+const DURABLE_PAGE_ROWS = 100
+const DURABLE_PAGE_BYTES = 8 * 1024 * 1024
+const durablePageEncoder = new TextEncoder()
+
+type DurablePage = {
+  readonly rows: Payload[]
+  readonly lastSeq: number
+  readonly hasMore: boolean
+}
+
+const serializedUtf8Bytes = (value: object) => durablePageEncoder.encode(JSON.stringify(value)).byteLength
+
 const getCodec = (definition: Definition): Codec => {
   const cached = codecCache.get(definition)
   if (cached) return cached
@@ -544,7 +556,12 @@ export const layerWith = (options?: LayerOptions) =>
 
       const streamAll = (): Stream.Stream<Payload> => Stream.fromPubSub(pubsub.all)
 
-      const readAfter = (aggregateID: string, after: number) =>
+      const readAfter = (
+        aggregateID: string,
+        after: number,
+        limitRows = DURABLE_PAGE_ROWS,
+        limitBytes = DURABLE_PAGE_BYTES,
+      ): Effect.Effect<DurablePage> =>
         (options?.beforeAggregateRead?.(aggregateID) ?? Effect.void).pipe(
           Effect.andThen(
             db
@@ -552,20 +569,35 @@ export const layerWith = (options?: LayerOptions) =>
               .from(EventTable)
               .where(and(eq(EventTable.aggregate_id, aggregateID), gt(EventTable.seq, after)))
               .orderBy(asc(EventTable.seq))
+              .limit(limitRows + 1)
               .all(),
           ),
           Effect.orDie,
-          Effect.map((rows) =>
-            rows.map((event) =>
-              decodeSerializedEvent({
+          Effect.map((rows) => {
+            const measured = rows.map((event) => {
+              const decoded = decodeSerializedEvent({
                 id: event.id,
                 aggregateID: event.aggregate_id,
                 seq: event.seq,
                 type: event.type,
                 data: event.data,
-              }),
-            ),
-          ),
+              })
+              return { event: decoded, bytes: serializedUtf8Bytes(decoded) }
+            })
+            const page = new Array<Payload>()
+            let pageBytes = 0
+            for (const [index, candidate] of measured.entries()) {
+              if (index > 0 && pageBytes + candidate.bytes > limitBytes) break
+              page.push(candidate.event)
+              pageBytes += candidate.bytes
+              if (page.length === limitRows) break
+            }
+            return {
+              rows: page,
+              lastSeq: page.at(-1)?.durable?.seq ?? after,
+              hasMore: page.length < measured.length,
+            }
+          }),
         )
 
       const subscribeDurable = (aggregateID: string) =>
@@ -594,18 +626,19 @@ export const layerWith = (options?: LayerOptions) =>
             const wakes = yield* subscribeDurable(input.aggregateID)
             let sequence = input.after ?? -1
             const read = Effect.suspend(() => readAfter(input.aggregateID, sequence)).pipe(
-              Effect.tap((events) =>
+              Effect.tap((page) =>
                 Effect.sync(() => {
-                  sequence = events.at(-1)?.durable?.seq ?? sequence
+                  sequence = page.lastSeq
                 }),
               ),
             )
-            const historical = yield* read
-            const live = Stream.fromSubscription(wakes).pipe(
-              Stream.mapEffect(() => read),
-              Stream.flattenIterable,
+            const drain = Stream.paginate(true, () =>
+              read.pipe(
+                Effect.map((page) => [page.rows, page.hasMore ? Option.some(true) : Option.none<true>()] as const),
+              ),
             )
-            return Stream.concat(Stream.fromIterable(historical), live)
+            const live = Stream.fromSubscription(wakes).pipe(Stream.flatMap(() => drain, { concurrency: 1 }))
+            return Stream.concat(drain, live)
           }),
         )
 
