@@ -47,6 +47,7 @@ git log --oneline v1.18.22..HEAD -- <file-path>   # everything touching a seam
 | Idle status dedupe                  | Repeated "session is idle" writes stop re-broadcasting status events to every connected client — passive-CPU fix                                                                                                                                                                    | [#40984](https://github.com/anomalyco/opencode/pull/40984) | **zcxGGmu**               |
 | Durable event codec reuse           | Event codecs are compiled once per definition and cached instead of being rebuilt on every encode/decode — cuts CPU and allocation churn on the hot event path (129 M read syscalls observed on a 2.5 h session)                                                                     | [#43778](https://github.com/anomalyco/opencode/pull/43778) | opencode-agent[bot]\*      |
 | Database stats + vacuum subcommands (partial port) | Adds `opencode db stats [--json]` and `opencode db vacuum`; the stats implementation is a partial port of the upstream command shape, while this fork's offline vacuum guard is documented under customs below. Stats read a read-only immutable view of the main database file (no locks, no sidecar writes); page/table values exclude uncheckpointed WAL contents, which `wal_bytes` reports separately | [#43456](https://github.com/anomalyco/opencode/pull/43456) | **AndyS77** |
+| Write-only summary diff patches  | New message summaries retain file/count/status metadata without patch text; recomputation returns available patch content, subject to the existing snapshot diff limits, while pruned snapshots fall back to metadata; zero migration and historical events untouched | [#40861](https://github.com/anomalyco/opencode/pull/40861) | **KirillDeviatka** |
 
 Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped.
 \*AI-authored upstream PR; credited here in prose only.
@@ -55,7 +56,7 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 
 | Feature                      | Plain language                                                                                                                                                                                                                                                                                                                     | Detail                                                                                                                                   |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Diff-patch caps              | Snapshots of large edits can't balloon memory and disk                                                                                                                                                                                                                                                                             | per-patch 100 KB, 256 KB aggregate; generated-path denylist; summaries store metadata and recompute on read                              |
+| Diff-patch caps              | Snapshots of large edits can't balloon memory and disk                                                                                                                                                                                                                                                                             | snapshot-produced patches are capped at 10 MiB per patch and 10 MiB aggregate (`packages/opencode/src/snapshot/index.ts:25-26`); generated-path denylist; new summaries store metadata and recompute on read                              |
 | Run-UI subagent tab eviction | The run-mode subagent list keeps the newest 50 finished agents, not every one ever spawned                                                                                                                                                                                                                                         | running, pinned, and permission-holding sessions exempt; evicted agents revive if they ask again; synthetic-gated background settlement  |
 | TUI payload eviction         | Sessions you navigate away from drop their message/part payloads from memory (keep-last-~20 viewed); they rehydrate on return                                                                                                                                                                                                      | guards for active/running/permission/in-flight sessions; failed revival re-arms; plugin getters auto-refetch                             |
 | Child conveyor (daily TUI)   | Child sessions reorder only when they _receive_ a message — delegation, task continuation, or direct input; tool rounds, permissions, and compaction never shuffle the list                                                                                                                                                        | client-side rank map (bounded 256, roots excluded); newest-50 window; viewed out-of-window child pins in; footer shows an honest N of 50 |
@@ -97,7 +98,6 @@ All knobs below use the source parser for their unit: byte limits require a `KB`
 
 | Upstream PR                             | Reason                                                                              |
 | --------------------------------------- | ----------------------------------------------------------------------------------- |
-| #40861 (summary diffs metadata-only)    | superseded by the diff-cap customs (same design, recompute fallback)                |
 | #42771 (event payload → side table)     | only remaining schema change; revisit if event-table disk growth becomes acute      |
 | #43455 (snapshot retry/circuit breaker) | robustness not memory; conflicts with diff-cap customs' surface                     |
 | #22428 (PRAGMA mmap_size=0)             | no-op on Linux; macOS-targeted                                                      |
@@ -146,6 +146,74 @@ cd opencode-lowmem
 Builds all platform targets, stamps the version (`<upstream>-lowmem.<round>`
 from git tags — round = highest existing + 1), smoke-tests, and tags the build.
 
+### Sandbox proof
+
+Before declaring a build or zero-migration round complete, run the isolated
+summary-diff proof from the repository root:
+
+```bash
+BIN=packages/opencode/dist/opencode-linux-x64/bin/opencode \
+SOURCE_XDG_DATA_HOME="$HOME/.local/share" \
+bun scripts/ram-bounds/summary-diff-proof.ts
+```
+
+The script validates `SOURCE_XDG_DATA_HOME` and an optional
+`SANDBOX_XDG_DATA_HOME` before use: configured roots cannot contain `..`, be
+symlinks, or overlap after both roots are canonicalized with `realpath()`. A
+configured sandbox is only created under its nearest existing ancestor after
+that ancestor is verified component-by-component to be free of symlinks, so a
+symlinked ancestor cannot redirect creation into the live data root. It
+opens the source database through `sqlite3 --readonly` and uses the CLI
+`.backup` command to make a WAL-safe copy inside the sandbox. The destination
+path is rejected if it contains a single quote or control character, rather
+than relying on dot-command quoting. The binary never receives the source
+root: it receives an environment allowlist containing `PATH`, sandbox `HOME`,
+the four sandbox XDG directories, `LANG`, and `TZ`.
+
+After the backup, every session directory in the sandbox database is remapped
+to the sandbox scratch directory. The script runs `session list`, then reads
+only the sandbox database. A metadata-only candidate gets the always-runnable
+HTTP diff assertion, which requires HTTP 200 and the stored file/count/status
+metadata. A retained-snapshot candidate must have both snapshot hashes in its
+`step-start`/`step-finish` parts and matching storage under
+`opencode/snapshot/<project-id>/<sha1(worktree)>` and a copyable standalone Git
+worktree (worktrees whose `.git` uses object alternates are disqualified
+because the alternates point at a live object store). The script ranks
+qualifying worktrees with `du` and skips the retained branch with that measured
+reason when the smallest exceeds the 300 MiB bound, and each attempt starts
+from a clean scratch directory so a failed candidate cannot leak into the next
+one. The copies themselves are transfer-bounded with a chunked copy that never
+writes more than the remaining byte allowance, so even a concurrently growing
+source cannot push peak sandbox disk usage past the bound — and the snapshot
+Git storage is made self-contained in the sandbox: the full object closure
+reachable from the two snapshot hashes is enumerated with `rev-list --objects`
+streamed to a file whose capture is capped at the remaining candidate bound
+(never buffered in this process), materialized locally by piping
+`pack-objects --stdout` into the same capped writer — git is killed the moment
+the pack crosses the remaining allowance, so a pathological pack can never
+land in full — indexed with `index-pack`, and the closure list plus
+pack+index(+rev) bytes are post-checked against the remaining bound before the
+borrowed alternates link into the live repository is removed. The index pair
+is the one artifact that can transiently overshoot before that post-check
+(its size is proportional to the packed object count, not content size); a
+failing check removes the whole candidate. The
+closure walk is repeated alternates-free so a missing blob anywhere in the
+reachability set fails before any `git` command serves the proof. Candidates
+are tried smallest-first until one satisfies the branch; only after every
+qualifying candidate fails does the retained check report `SKIP` with the
+aggregated per-candidate reasons. Otherwise it starts one sandbox-owned
+`serve` process, and requires the retained HTTP diff response to contain a real
+non-omitted patch string. Both checks use the remapped sandbox directory.
+
+Missing source, missing `sqlite3`, invalid configured roots, a non-empty
+configured sandbox, an unsafe backup destination, or a missing `BIN` are
+friendly failures. Missing metadata or retained candidates are explicit
+`SKIP` results, never fabricated fixtures. Shutdown sends `SIGTERM`, waits at
+most two seconds, then sends `SIGKILL` and waits up to another two seconds under
+a hard deadline. Set `SANDBOX_XDG_DATA_HOME` to an empty isolated directory to keep
+the sandbox for inspection; otherwise the generated temporary directory is
+removed during cleanup.
+
 ## Maintaining the fork
 
 Rebase onto the new upstream tag. Behavior-pinning tests fail loudly if an
@@ -161,6 +229,10 @@ is fork-owned files):
   deadline (guarded by `test/provider/header-timeout.test.ts`)
 - `packages/opencode/src/session/session.ts` — one-line shallow-copy in
   `updatePart` (#35107)
+- `packages/opencode/src/session/summary.ts` — one-line write seam applying
+  metadata-only trimming before the durable message update
+- `packages/opencode/src/session/summary-diff-trim.ts` — fork-owned helper that
+  strips patch text from new summary entries; keep it separate for rebases
 - `packages/opencode/src/cli/cmd/run/subagent-data.ts` + `stream.transport.ts` —
   run-UI eviction (settle/revive/compact helpers; small transport delta)
 - `packages/tui/src/context/sync.tsx` — marked `Fork(lowmem)` hunks: delta-buffer

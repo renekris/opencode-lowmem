@@ -59,6 +59,17 @@ not-ported list, credit — keep its tables updated on every port).
    must render sessions with exit 0.
 10. Update README (fix-table statuses, new base tag) and this file only if the procedure changed.
 
+Summary-diff maintenance: `packages/opencode/src/session/summary.ts` is the
+small rebase seam where new summary writes call the fork-owned
+`packages/opencode/src/session/summary-diff-trim.ts` helper. The helper is
+write-only: new durable summaries keep metadata, retained snapshots recompute
+patches on demand, and pruned snapshots use metadata fallback; historical
+events are untouched and no migration is needed. Re-run
+`scripts/ram-bounds/summary-diff-proof.ts` after rebasing this seam, after
+changing snapshot/session persistence, and before promoting a build. The proof
+requires `SOURCE_XDG_DATA_HOME`, uses a generated isolated sandbox by default,
+and must never point the binary at the live data root.
+
 Rollback: `git checkout local-diff-caps && ./scripts/fork-build.sh`.
 
 <!-- FORK END -->
