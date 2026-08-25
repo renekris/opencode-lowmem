@@ -151,7 +151,7 @@ async function readDatabaseStats(filename: string): Promise<DatabaseStats> {
       fileBytes: filename === ":memory:" ? 0 : Bun.file(filename).size,
       walBytes: filename === ":memory:" ? 0 : Bun.file(`${filename}-wal`).size,
       approximateBytesMethod:
-        "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size)",
+        "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
       tables,
     }
   } finally {

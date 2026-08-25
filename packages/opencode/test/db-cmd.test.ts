@@ -175,7 +175,7 @@ describe("opencode db stats", () => {
           fileBytes: expected.fileBytes,
           walBytes: expected.walBytes,
           approximateBytesMethod:
-            "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size)",
+            "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
           tables: expect.arrayContaining([
             expect.objectContaining({ name: "event", rowCount: expected.tables[0]?.rowCount }),
             expect.objectContaining({ name: "session", rowCount: expected.tables[1]?.rowCount }),
@@ -209,7 +209,7 @@ describe("opencode db stats", () => {
           fileBytes: 0,
           walBytes: 0,
           approximateBytesMethod:
-            "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size)",
+            "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
           tables: [],
         }),
       )
