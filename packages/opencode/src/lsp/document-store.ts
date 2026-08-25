@@ -1,6 +1,8 @@
 import path from "path"
 import { Filesystem } from "@/util/filesystem"
-import { EnvLimit } from "@/util/env-limit"
+import { EnvLimit } from "@opencode-ai/core/util/env-limit"
+
+const TEXT_ENCODER = new TextEncoder()
 
 export type FullDocument = {
   readonly path: string
@@ -90,7 +92,6 @@ export type Interface = {
   readonly onEvict: (listener: EvictListener) => () => void
   readonly closeAll: () => Promise<void>
   readonly stats: () => Stats
-  readonly getGeneration: () => number
   readonly generation: number
 }
 
@@ -115,14 +116,14 @@ export function create(options: Options = {}): Interface {
   let lastWarningAt = Number.NEGATIVE_INFINITY
 
   const normalize = (documentPath: string) => Filesystem.normalizePath(path.resolve(documentPath))
-  const byteLength = (text: string) => new TextEncoder().encode(text).byteLength
-  const isOversized = (text: string) => {
-    const bytes = byteLength(text)
+  const byteLength = (text: string) => TEXT_ENCODER.encode(text).byteLength
+  const isOversizedBytes = (bytes: number) => {
     return (
       (documentOpenAllowanceBytes > 0 && bytes > documentOpenAllowanceBytes) ||
       (documentMaxBytes > 0 && bytes > documentMaxBytes)
     )
   }
+  const isOversized = (text: string) => isOversizedBytes(byteLength(text))
   const runSerialized = async <T>(documentPath: string, action: () => Promise<T>) => {
     const previous = serial.get(documentPath) ?? Promise.resolve()
     const current = previous.then(action)
@@ -243,15 +244,16 @@ export function create(options: Options = {}): Interface {
         // second resident copy of the text (plan's single in-flight read residual).
         const text = typeof source === "function" ? await source() : source
         const existing = documents.get(normalizedPath)
-        const oversized = isOversized(text)
+        const bytes = byteLength(text)
+        const oversized = isOversizedBytes(bytes)
         const reopen = existing !== undefined && (existing.document.metadataOnly || oversized)
         if (reopen && existing) await evict(normalizedPath, existing)
 
         const previous = reopen ? undefined : existing?.document
         const version = previous?.version === undefined ? 0 : previous.version + 1
         const document: Document = oversized
-          ? { path: normalizedPath, version, byteLength: byteLength(text), metadataOnly: true }
-          : { path: normalizedPath, version, text, byteLength: byteLength(text), metadataOnly: false }
+          ? { path: normalizedPath, version, byteLength: bytes, metadataOnly: true }
+          : { path: normalizedPath, version, text, byteLength: bytes, metadataOnly: false }
         const item: StoredDocument = { document, state: "opening" }
         if (existing && !reopen) documents.delete(normalizedPath)
         documents.set(normalizedPath, item)
@@ -321,7 +323,6 @@ export function create(options: Options = {}): Interface {
     onEvict,
     closeAll,
     stats,
-    getGeneration: () => generation,
     get generation() {
       return generation
     },

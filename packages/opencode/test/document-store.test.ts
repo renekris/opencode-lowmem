@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import vectors from "./env-limit-vectors.json" with { type: "json" }
+import vectors from "../../core/test/env-limit-vectors.json" with { type: "json" }
 import { DocumentStore } from "@/lsp/document-store"
-import { EnvLimit } from "@/util/env-limit"
+import { EnvLimit } from "@opencode-ai/core/util/env-limit"
 
 describe("environment limit parser", () => {
   test("matches the shared count and byte vectors", () => {
