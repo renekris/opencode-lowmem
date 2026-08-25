@@ -5,6 +5,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { SessionID, MessageID } from "./schema"
+import { trimSummaryDiffs } from "./summary-diff-trim"
 import { Config } from "@/config/config"
 
 function unquoteGitPath(input: string) {
@@ -122,9 +123,7 @@ const layer = Layer.effect(
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
       const msgDiffs = yield* computeDiff({ messages })
-      // Fork(lowmem): patches are persisted because snapshot objects are pruned
-      // after 7 days; diffFull output is already byte-capped, so this stays bounded.
-      target.info.summary = { ...target.info.summary, diffs: msgDiffs }
+      target.info.summary = { ...target.info.summary, diffs: trimSummaryDiffs(msgDiffs) }
       yield* sessions.updateMessage(target.info)
     })
 

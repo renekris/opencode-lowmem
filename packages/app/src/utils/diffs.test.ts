@@ -12,6 +12,13 @@ const item = {
   status: "modified",
 } satisfies FileDiffInfo & SnapshotFileDiff
 
+const metadataOnlyItem = {
+  file: "src/metadata-only.ts",
+  additions: 2,
+  deletions: 1,
+  status: "modified",
+} satisfies SnapshotFileDiff
+
 describe("diffs", () => {
   test("keeps valid arrays", () => {
     expect(diffs([item])).toEqual([item])
@@ -29,10 +36,32 @@ describe("diffs", () => {
     expect(
       diffs([
         item,
-        { file: "src/bad.ts", additions: 1, deletions: 1 },
+        { file: "src/bad.ts", additions: 1, deletions: 1, patch: 42 },
+        { file: "src/missing-count.ts", deletions: 1, patch: item.patch },
+        { file: "src/string-count.ts", additions: "1", deletions: 1, patch: item.patch },
         { patch: item.patch, additions: 1, deletions: 1 },
       ]),
     ).toEqual([item])
+  })
+
+  test("keeps patch-absent summary diffs during message normalization", () => {
+    const input = {
+      id: "msg_1",
+      sessionID: "ses_1",
+      role: "user",
+      time: { created: 1 },
+      agent: "build",
+      model: { providerID: "openai", modelID: "gpt-5" },
+      summary: {
+        diffs: [metadataOnlyItem],
+      },
+    } as unknown as Message
+
+    expect(message(input)).toMatchObject({
+      summary: {
+        diffs: [metadataOnlyItem],
+      },
+    })
   })
 })
 

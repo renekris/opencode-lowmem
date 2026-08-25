@@ -11,6 +11,7 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { trimSummaryDiffs } from "./summary-diff-trim"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { locationServiceMapLayer } from "@opencode-ai/core/location-services"
 
@@ -711,12 +712,18 @@ const layer: Layer.Layer<
         idMap.set(msg.info.id, newID)
 
         const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
-        const cloned = yield* updateMessage({
+        const clone: SessionV1.Info = {
           ...msg.info,
           sessionID: session.id,
           id: newID,
           ...(parentID && { parentID }),
-        })
+        }
+        // Fork(lowmem): messages summarized before write-time trimming still
+        // carry full patches; strip them before re-publishing as new events.
+        if (typeof clone.summary === "object" && clone.summary.diffs) {
+          clone.summary = { ...clone.summary, diffs: trimSummaryDiffs(clone.summary.diffs) }
+        }
+        const cloned = yield* updateMessage(clone)
 
         for (const part of msg.parts) {
           const p: SessionV1.Part = {

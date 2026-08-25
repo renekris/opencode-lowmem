@@ -2,6 +2,33 @@ import { describe, expect, test } from "bun:test"
 import { normalize, resolveFileDiff, text } from "./session-diff"
 
 describe("session diff", () => {
+  test("renders patch-absent summary metadata as an empty file diff", () => {
+    const diff = {
+      file: "a.ts",
+      additions: 2,
+      deletions: 1,
+      status: "modified" as const,
+    }
+
+    const view = normalize(diff)
+    const fileDiff = resolveFileDiff(diff)
+
+    expect(view).toMatchObject({
+      file: "a.ts",
+      additions: 2,
+      deletions: 1,
+      status: "modified",
+    })
+    expect(view.fileDiff.name).toBe("a.ts")
+    expect(view.fileDiff.isPartial).toBe(false)
+    expect(text(view, "deletions")).toBe("")
+    expect(text(view, "additions")).toBe("")
+    expect(fileDiff.name).toBe("a.ts")
+    expect(fileDiff.isPartial).toBe(false)
+    expect(fileDiff.deletionLines).toEqual([])
+    expect(fileDiff.additionLines).toEqual([])
+  })
+
   test("renders whole-file unified patches as complete diffs", () => {
     const diff = {
       file: "a.ts",

@@ -1,6 +1,18 @@
-import { describe, expect, test } from "bun:test"
-import type { SnapshotFileDiff } from "@opencode-ai/sdk/v2"
+import { describe, expect, mock, test } from "bun:test"
+import type { SnapshotFileDiff, UserMessage } from "@opencode-ai/sdk/v2"
 import { uniqueSummaryDiffs } from "./summary-diffs"
+
+mock.module("@opencode-ai/session-ui/message-part", () => ({
+  renderable: () => true,
+  groupParts: (refs: Array<{ messageID: string; part: { id: string } }>) =>
+    refs.map((ref) => ({
+      type: "part" as const,
+      key: ref.part.id,
+      ref: { messageID: ref.messageID, partID: ref.part.id },
+    })),
+}))
+
+const { Timeline } = await import("./rows")
 
 const diff = (file: string, additions: number) =>
   ({
@@ -38,5 +50,30 @@ describe("uniqueSummaryDiffs", () => {
     expect(result[0]).toBe(newAlpha)
     expect(result[1]).toBe(charlie)
     expect(result[2]).toBe(newBeta)
+  })
+
+  test("creates a visible row from deduplicated metadata-only diffs", () => {
+    const oldAlpha = diff("alpha.ts", 1)
+    const newAlpha = diff("alpha.ts", 2)
+    const beta = diff("beta.ts", 1)
+    const userMessage = {
+      id: "msg_1",
+      sessionID: "ses_1",
+      role: "user",
+      time: { created: 1 },
+      agent: "build",
+      model: { providerID: "openai", modelID: "gpt-5" },
+      summary: { diffs: [oldAlpha, newAlpha, beta] },
+    } as unknown as UserMessage
+
+    const rows = Timeline.constructMessageRows(userMessage, () => [], [], 0, false, "idle", false, false)
+
+    expect(rows).toContainEqual(
+      expect.objectContaining({
+        _tag: "DiffSummary",
+        userMessageID: "msg_1",
+        diffs: [newAlpha, beta],
+      }),
+    )
   })
 })
