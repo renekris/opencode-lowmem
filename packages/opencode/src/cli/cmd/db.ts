@@ -14,6 +14,8 @@ type DatabaseTableStats = {
   readonly approximateBytes: number
 }
 
+type DatabaseTable = { readonly name: string } | DatabaseTableStats
+
 type DatabaseStats = {
   readonly databasePath: string
   readonly pageSize: number
@@ -23,23 +25,29 @@ type DatabaseStats = {
   readonly fileBytes: number
   readonly walBytes: number
   readonly approximateBytesMethod: string
-  readonly tables: readonly DatabaseTableStats[]
+  readonly tables: readonly DatabaseTable[]
 }
 
 type SqliteDatabase = import("bun:sqlite").Database
 type SqliteBindings = import("bun:sqlite").SQLQueryBindings
 
-const StatsCommand = cmd<{}, { json?: boolean }>({
+const StatsCommand = cmd<{}, { json?: boolean; exhaustive?: boolean }>({
   command: "stats",
   describe: "show read-only database size statistics",
   builder: (yargs: Argv) =>
-    yargs.option("json", {
-      type: "boolean",
-      default: false,
-      describe: "Output machine-readable JSON",
-    }),
+    yargs
+      .option("json", {
+        type: "boolean",
+        default: false,
+        describe: "Output machine-readable JSON",
+      })
+      .option("exhaustive", {
+        type: "boolean",
+        default: false,
+        describe: "Scan the full database for per-table row and byte totals",
+      }),
   async handler(args) {
-    const stats = await readDatabaseStats(Database.path())
+    const stats = await readDatabaseStats(Database.path(), args.exhaustive === true)
     if (args.json) {
       console.log(JSON.stringify(stats, null, 2))
       return
@@ -111,7 +119,7 @@ export const DbCommand = cmd<{}, {}>({
   handler() {},
 })
 
-async function readDatabaseStats(filename: string): Promise<DatabaseStats> {
+async function readDatabaseStats(filename: string, exhaustive: boolean): Promise<DatabaseStats> {
   if (filename !== ":memory:" && !(await Bun.file(filename).exists())) {
     throw new Error(`Cannot read database: file does not exist: ${filename}`)
   }
@@ -135,7 +143,7 @@ async function readDatabaseStats(filename: string): Promise<DatabaseStats> {
         SqliteBindings[]
       >("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
-    const tables = tableNames.map((table) => readTableStats(database, table.name))
+    const tables = exhaustive ? tableNames.map((table) => readTableStats(database, table.name)) : tableNames
 
     return {
       databasePath: filename,
@@ -146,7 +154,9 @@ async function readDatabaseStats(filename: string): Promise<DatabaseStats> {
       fileBytes: filename === ":memory:" ? 0 : Bun.file(filename).size,
       walBytes: filename === ":memory:" ? 0 : Bun.file(`${filename}-wal`).size,
       approximateBytesMethod:
-        "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
+        exhaustive
+          ? "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents"
+          : "not collected by default; use --exhaustive to scan table contents",
       tables,
     }
   } finally {
@@ -203,8 +213,13 @@ function printDatabaseStats(stats: DatabaseStats) {
   console.log(`wal_bytes\t${formatBytes(stats.walBytes)}`)
   console.log(`approximate_bytes_method\t${stats.approximateBytesMethod}`)
   console.log()
-  console.log("Table\tRows\tApprox. payload bytes")
+  const exhaustive = stats.tables.some((table) => "rowCount" in table)
+  console.log(exhaustive ? "Table\tRows\tApprox. payload bytes" : "Table")
   for (const table of stats.tables) {
-    console.log(`${table.name}\t${table.rowCount}\t${formatBytes(table.approximateBytes)}`)
+    if ("rowCount" in table && "approximateBytes" in table) {
+      console.log(`${table.name}\t${table.rowCount}\t${formatBytes(table.approximateBytes)}`)
+      continue
+    }
+    console.log(table.name)
   }
 }

@@ -81,6 +81,7 @@ async function readFixtureExpectations(filename: string) {
       freelistCount: readNumber(db, "PRAGMA freelist_count", "freelist_count"),
       fileBytes: Bun.file(filename).size,
       walBytes: Bun.file(`${filename}-wal`).size,
+      tableNames: ["event", "event_sequence", "message", "part", "project", "session"],
       tables: ["event", "session", "message", "part"].map((name) => ({
         name,
         rowCount: readNumber(db, `SELECT COUNT(*) AS row_count FROM "${name}"`, "row_count"),
@@ -138,10 +139,8 @@ describe("opencode db stats", () => {
         expect(result.stdout).toContain("Database statistics")
         expect(result.stdout).toContain("page_count")
         expect(result.stdout).toContain("freelist_count")
-        expect(result.stdout).toContain(`event\t${expected.tables[0]?.rowCount}`)
-        expect(result.stdout).toContain(`session\t${expected.tables[1]?.rowCount}`)
-        expect(result.stdout).toContain(`message\t${expected.tables[2]?.rowCount}`)
-        expect(result.stdout).toContain(`part\t${expected.tables[3]?.rowCount}`)
+        for (const name of expected.tableNames) expect(result.stdout).toContain(`\n${name}\n`)
+        expect(result.stdout).not.toMatch(/^(?:event|event_sequence|message|part|project|session)\t/m)
 
         const after = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
         expect(after).toEqual(before)
@@ -175,19 +174,66 @@ describe("opencode db stats", () => {
           fileBytes: expected.fileBytes,
           walBytes: expected.walBytes,
           approximateBytesMethod:
+            "not collected by default; use --exhaustive to scan table contents",
+          tables: expected.tableNames.map((name) => ({ name })),
+        }),
+      )
+      expect(JSON.stringify(output)).not.toMatch(/"rowCount"|"approximateBytes":/)
+
+      const after = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
+      expect(after).toEqual(before)
+      expect(after.slice(1).every((file) => !file.exists)).toBe(true)
+    }),
+  )
+
+  cliIt.live("reports exhaustive machine-readable database statistics with --exhaustive", ({ home, opencode }) =>
+    Effect.gen(function* () {
+      const filename = path.join(home, "stats-exhaustive.sqlite")
+      yield* Effect.promise(() => createFixtureDatabase(filename))
+      const expected = yield* Effect.promise(() => readFixtureExpectations(filename))
+      const before = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
+
+      const tableResult = yield* opencode.spawn(["db", "stats", "--exhaustive"], {
+        env: { OPENCODE_DB: filename, OPENCODE_DISABLE_CHANNEL_DB: "1" },
+      })
+
+      opencode.expectExit(tableResult, 0, "db stats --exhaustive")
+      expect(tableResult.stdout).toContain("Table\tRows\tApprox. payload bytes")
+      for (const table of expected.tables) {
+        expect(tableResult.stdout).toMatch(new RegExp(`^${table.name}\\t${table.rowCount}\\t\\S+ \\S+$`, "m"))
+      }
+
+      const result = yield* opencode.spawn(["db", "stats", "--json", "--exhaustive"], {
+        env: { OPENCODE_DB: filename, OPENCODE_DISABLE_CHANNEL_DB: "1" },
+      })
+
+      opencode.expectExit(result, 0, "db stats --json --exhaustive")
+      const output: unknown = JSON.parse(result.stdout)
+      expect(output).toEqual(
+        expect.objectContaining({
+          databasePath: filename,
+          pageSize: expected.pageSize,
+          pageCount: expected.pageCount,
+          freelistCount: expected.freelistCount,
+          databaseBytes: expected.pageSize * expected.pageCount,
+          fileBytes: expected.fileBytes,
+          walBytes: expected.walBytes,
+          approximateBytesMethod:
             "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
-          tables: expect.arrayContaining([
-            expect.objectContaining({ name: "event", rowCount: expected.tables[0]?.rowCount }),
-            expect.objectContaining({ name: "session", rowCount: expected.tables[1]?.rowCount }),
-            expect.objectContaining({ name: "message", rowCount: expected.tables[2]?.rowCount }),
-            expect.objectContaining({ name: "part", rowCount: expected.tables[3]?.rowCount }),
-          ]),
+          tables: expect.arrayContaining(
+            expected.tables.map((table) =>
+              expect.objectContaining({
+                name: table.name,
+                rowCount: table.rowCount,
+                approximateBytes: expect.any(Number),
+              }),
+            ),
+          ),
         }),
       )
 
       const after = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
       expect(after).toEqual(before)
-      expect(after.slice(1).every((file) => !file.exists)).toBe(true)
     }),
   )
 
@@ -209,7 +255,7 @@ describe("opencode db stats", () => {
           fileBytes: 0,
           walBytes: 0,
           approximateBytesMethod:
-            "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size); reads a read-only immutable view of the main database file, excluding uncheckpointed WAL contents",
+            "not collected by default; use --exhaustive to scan table contents",
           tables: [],
         }),
       )
