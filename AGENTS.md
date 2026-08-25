@@ -72,7 +72,10 @@ changing snapshot/session persistence, and before promoting a build. The proof
 requires `SOURCE_XDG_DATA_HOME`, uses a generated isolated sandbox by default,
 and must never point the binary at the live data root.
 
-Rollback: `git checkout local-diff-caps && ./scripts/fork-build.sh`.
+Rollback:
+1. Revert the functional commits of the affected round(s) on the active line.
+2. Rebuild: `./scripts/fork-build.sh`.
+3. Verify the shim reports the new version: `~/.opencode/bin/opencode --version` (or the dist binary path printed by the script).
 
 <!-- FORK END -->
 

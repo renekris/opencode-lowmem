@@ -46,7 +46,7 @@ git log --oneline v1.18.22..HEAD -- <file-path>   # everything touching a seam
 | PartUpdated shallow copy            | Parts stop being deep-cloned on every publish — a top RAM driver in long sessions (issue [#35107](https://github.com/anomalyco/opencode/issues/35107) by **xingruodong-sys**; fix shape from closed [#43733](https://github.com/anomalyco/opencode/pull/43733) by **ColeLindfors**) | #35107 / #43733                                            | credited here             |
 | Idle status dedupe                  | Repeated "session is idle" writes stop re-broadcasting status events to every connected client — passive-CPU fix                                                                                                                                                                    | [#40984](https://github.com/anomalyco/opencode/pull/40984) | **zcxGGmu**               |
 | Durable event codec reuse           | Event codecs are compiled once per definition and cached instead of being rebuilt on every encode/decode — cuts CPU and allocation churn on the hot event path (129 M read syscalls observed on a 2.5 h session)                                                                     | [#43778](https://github.com/anomalyco/opencode/pull/43778) | opencode-agent[bot]\*      |
-| Database stats + vacuum subcommands (partial port) | Adds `opencode db stats [--json]` and `opencode db vacuum`; the stats implementation is a partial port of the upstream command shape, while this fork's offline vacuum guard is documented under customs below. Stats read a read-only immutable view of the main database file (no locks, no sidecar writes); page/table values exclude uncheckpointed WAL contents, which `wal_bytes` reports separately | [#43456](https://github.com/anomalyco/opencode/pull/43456) | **AndyS77** |
+| Database stats + vacuum subcommands (partial port) | Adds `opencode db stats [--json] [--exhaustive]` and `opencode db vacuum`; the stats implementation is a partial port of the upstream command shape, while this fork's offline vacuum guard is documented under customs below. Default stats read only cheap metadata (page counts, freelist, sidecar sizes, table names — no table scans). `--exhaustive` additionally reports per-table row counts and approximate payload bytes by scanning the full database. Stats read a read-only immutable view of the main database file (no locks, no sidecar writes); page/table values exclude uncheckpointed WAL contents, which `wal_bytes` reports separately | [#43456](https://github.com/anomalyco/opencode/pull/43456) | **AndyS77** |
 | Write-only summary diff patches  | New message summaries retain file/count/status metadata without patch text; recomputation returns available patch content, subject to the existing snapshot diff limits, while pruned snapshots fall back to metadata; zero migration and historical events untouched | [#40861](https://github.com/anomalyco/opencode/pull/40861) | **KirillDeviatka** |
 
 Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped.
@@ -78,21 +78,34 @@ All knobs below use the source parser for their unit: byte limits require a `KB`
 | TUI payload | `OPENCODE_TUI_PAYLOAD_BUDGET_MB` | `256MB` | Total non-active payload bytes |
 | TUI payload | `OPENCODE_TUI_PAYLOAD_SESSION_LIMIT` | `20` | Retained non-active sessions |
 | TUI payload | `OPENCODE_TUI_ACTIVE_ALLOWANCE_MB` | `128MB` | Active-session payload allowance |
-| TUI payload | `OPENCODE_TUI_ACTIVE_PART_MAX_MB` | `32MB` | Per-part cap for active sessions (same-wave knob) |
+| TUI payload | `OPENCODE_TUI_ACTIVE_PART_MAX_MB` | `32MB` | Per-part scalar-leaf cap for active sessions (see below) |
 | TUI payload | `OPENCODE_TUI_PART_INGRESS_MAX_KB` | `256KB` | Per-part ingress bytes |
 | TUI delta buffer | `OPENCODE_TUI_DELTA_BUFFER_MAX_KB` | `4096KB` | Pending delta bytes |
 | TUI delta buffer | `OPENCODE_TUI_DELTA_BUFFER_MAX_ENTRIES` | `512` | Pending delta entries |
 | TUI mirror | `OPENCODE_TUI_MIRROR_BUDGET_MB` | `64MB` | Mirrored message bytes |
 | TUI mirror | `OPENCODE_TUI_MIRROR_MSG_MAX_KB` | `512KB` | Per-message mirrored bytes |
 | TUI mirror | `OPENCODE_TUI_MIRROR_SESSION_LIMIT` | `20` | Mirrored sessions |
-| TUI permissions | `OPENCODE_TUI_PERMISSION_ALLOWANCE_MB` | `32MB` | Pending permission-input bytes |
+| TUI permissions | `OPENCODE_TUI_PERMISSION_ALLOWANCE_MB` | `32MB` | Stored permission-input byte bound (2x allowance) |
+| TUI permissions | `OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES` | `512` | Stored permission-input entry count bound |
 | LSP documents | `OPENCODE_LSP_DOC_LIMIT` | `128` | Resident full-text documents |
 | LSP documents | `OPENCODE_LSP_DOC_MAX_MB` | `64MB` | Resident full-text bytes |
 | LSP documents | `OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB` | `32MB` | Single-document open allowance |
 | LSP documents | `OPENCODE_LSP_OVERSIZED_LIMIT` | `8` | Metadata-only oversized-document records |
+| LSP diagnostics | `OPENCODE_LSP_PULL_DIAGNOSTICS_LIMIT` | `256` | Retained pull-diagnostic files (never-opened) |
+| LSP diagnostics | `OPENCODE_LSP_PULL_DIAGNOSTICS_MAX_MB` | `8MB` | Retained pull-diagnostic bytes (never-opened) |
 | Background jobs | `OPENCODE_BGJOB_SETTLED_MAX` | `100` | Settled terminal entries |
 | Background jobs | `OPENCODE_BGJOB_SETTLED_OUTPUT_MAX_MB` | `8MB` | Settled terminal output bytes |
 | Durable events | fixed `DURABLE_PAGE_ROWS` / `DURABLE_PAGE_BYTES` | `100` / `8 MiB` | Row and serialized-byte page caps; no env knobs |
+
+Part-cap scope (honest bounds): `OPENCODE_TUI_ACTIVE_PART_MAX_MB` truncates
+selected scalar leaves only — part text/reasoning/completed-tool output, and
+permission inputs. It is not a whole-part envelope: `ToolPart.state.input`,
+`state.metadata`, error strings, `SnapshotPart.snapshot`, `SubtaskPart.prompt`,
+and `AssistantMessage.structured` pass through untruncated, and the active
+session's message count, todos, and session diffs remain unbounded. A
+pathological active session therefore has no finite worst-case RSS under this
+design; the bound removes the streaming-text and tool-output accumulators that
+dominated real-world growth.
 
 ## Deliberately NOT ported
 

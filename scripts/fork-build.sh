@@ -27,11 +27,11 @@ if [[ "${OUT}" != "${STAMP}" ]]; then
   echo "fork-build: smoke test failed: binary reports '${OUT}', expected '${STAMP}'" >&2
   exit 1
 fi
-git tag "v${STAMP}"
 
 SHIM="${HOME}/.opencode/bin/opencode"
 # Deliberate out-of-band shim management may set this escape hatch to 1.
 ALLOW_SHIM_MISMATCH="${OPENCODE_FORK_BUILD_ALLOW_SHIM_MISMATCH:-0}"
+SHIM_MISMATCH_ACCEPTED=0
 if [[ -f "${SHIM}" ]]; then
   echo "==> shim exists at ${SHIM} (left untouched)"
   if ! grep -qF "${BIN}" "${SHIM}"; then
@@ -39,6 +39,7 @@ if [[ -f "${SHIM}" ]]; then
       echo "fork-build: shim does not reference ${BIN}; set OPENCODE_FORK_BUILD_ALLOW_SHIM_MISMATCH=1 only for deliberate out-of-band shim management" >&2
       exit 1
     fi
+    SHIM_MISMATCH_ACCEPTED=1
     echo "!! shim does not reference ${BIN} — mismatch explicitly allowed"
   fi
 else
@@ -54,8 +55,15 @@ if [[ "${SHIM_OUT}" != "${STAMP}" ]]; then
     echo "fork-build: shim reports '${SHIM_OUT}', expected '${STAMP}'" >&2
     exit 1
   fi
+  SHIM_MISMATCH_ACCEPTED=1
   echo "!! shim reports '${SHIM_OUT}', expected '${STAMP}' — mismatch explicitly allowed"
 else
   echo "==> verified shim version ${SHIM_OUT}"
 fi
+if [[ "${SHIM_MISMATCH_ACCEPTED}" == "1" ]]; then
+  echo "==> tagging ${STAMP}; shim mismatch escape hatch accepted, promotion proceeds with warning"
+else
+  echo "==> tagging ${STAMP}; build and shim checks passed"
+fi
+git tag "v${STAMP}"
 echo "==> done: ${STAMP}"
