@@ -10,6 +10,7 @@ import { withTimeout } from "../util/timeout"
 import { Filesystem } from "@/util/filesystem"
 import type { InstanceContext } from "@/project/instance-context"
 import { DocumentStore } from "./document-store"
+import { EnvLimit } from "@opencode-ai/core/util/env-limit"
 
 const DIAGNOSTICS_DEBOUNCE_MS = 150
 const DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS = 5_000
@@ -20,6 +21,8 @@ const OVERSIZED_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3_000
 const INITIALIZE_TIMEOUT_MS = 45_000
 
 const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2
+
+const diagnosticMeasure = new TextEncoder()
 
 export type Info = NonNullable<Awaited<ReturnType<typeof create>>>
 
@@ -50,6 +53,12 @@ type DiagnosticRequestResult = {
   handled: boolean
   matched: boolean
   byFile: Map<string, Diagnostic[]>
+}
+
+type PullDiagnosticEntry = {
+  readonly diagnostics: Diagnostic[]
+  readonly bytes: number
+  readonly evictable: boolean
 }
 
 type DocumentGeneration = {
@@ -148,7 +157,11 @@ export async function create(input: {
   // --- Connection state ---
 
   const pushDiagnostics = new Map<string, Diagnostic[]>()
-  const pullDiagnostics = new Map<string, Diagnostic[]>()
+  const pullDiagnostics = new Map<string, PullDiagnosticEntry>()
+  const pullDiagnosticCountLimit = EnvLimit.readEnvLimit("OPENCODE_LSP_PULL_DIAGNOSTICS_LIMIT", "256", "count")
+  const pullDiagnosticBytesLimit = EnvLimit.readEnvLimit("OPENCODE_LSP_PULL_DIAGNOSTICS_MAX_MB", "8MB", "bytes")
+  let pullDiagnosticCount = 0
+  let pullDiagnosticBytes = 0
   const published = new Map<string, { at: number; version?: number }>()
   const diagnosticRegistrations = new Map<string, CapabilityRegistration>()
   const registrationListeners = new Set<() => void>()
@@ -163,6 +176,29 @@ export async function create(input: {
     const generation = { sequence: ++nextDocumentGeneration }
     documentGenerations.set(documentPath, generation)
     return generation
+  }
+  const deletePullDiagnostics = (documentPath: string) => {
+    const entry = pullDiagnostics.get(documentPath)
+    if (!entry) return
+    pullDiagnostics.delete(documentPath)
+    if (!entry.evictable) return
+    pullDiagnosticCount -= 1
+    pullDiagnosticBytes -= entry.bytes
+  }
+  const enforcePullDiagnosticLimits = () => {
+    while (
+      (pullDiagnosticCountLimit > 0 && pullDiagnosticCount > pullDiagnosticCountLimit) ||
+      (pullDiagnosticBytesLimit > 0 && pullDiagnosticBytes > pullDiagnosticBytesLimit)
+    ) {
+      let oldestPath: string | undefined
+      for (const [documentPath, entry] of pullDiagnostics) {
+        if (!entry.evictable || documents.has(documentPath)) continue
+        oldestPath = documentPath
+        break
+      }
+      if (oldestPath === undefined) return
+      deletePullDiagnostics(oldestPath)
+    }
   }
   const rememberClosedDocument = (documentPath: string) => {
     if (closedDocumentLimit <= 0) return
@@ -185,13 +221,16 @@ export async function create(input: {
       })
     }
     pushDiagnostics.delete(documentPath)
-    pullDiagnostics.delete(documentPath)
+    deletePullDiagnostics(documentPath)
     published.delete(documentPath)
     rememberClosedDocument(documentPath)
     for (const listener of [...documentGenerationListeners]) listener()
   })
   const mergedDiagnostics = (filePath: string) =>
-    dedupeDiagnostics([...(pushDiagnostics.get(filePath) ?? []), ...(pullDiagnostics.get(filePath) ?? [])])
+    dedupeDiagnostics([
+      ...(pushDiagnostics.get(filePath) ?? []),
+      ...(pullDiagnostics.get(filePath)?.diagnostics ?? []),
+    ])
   const updatePushDiagnostics = (filePath: string, next: Diagnostic[]) => {
     if (!documents.has(filePath)) return
     pushDiagnostics.set(filePath, next)
@@ -199,7 +238,19 @@ export async function create(input: {
   }
   const updatePullDiagnostics = (filePath: string, next: Diagnostic[]) => {
     if (skipsPullDiagnostics(filePath)) return
-    pullDiagnostics.set(filePath, next)
+    deletePullDiagnostics(filePath)
+    const evictable = !documents.has(filePath)
+    const entry = {
+      diagnostics: next,
+      bytes: diagnosticMeasure.encode(JSON.stringify(next)).byteLength,
+      evictable,
+    }
+    pullDiagnostics.set(filePath, entry)
+    if (evictable) {
+      pullDiagnosticCount += 1
+      pullDiagnosticBytes += entry.bytes
+      enforcePullDiagnosticLimits()
+    }
   }
   // Pull results cover files the server knows about, including never-opened
   // workspace files; only server-side-closed documents (tombstoned evictions
@@ -658,7 +709,7 @@ export async function create(input: {
             case "open": {
               closedDocuments.delete(normalizedPath)
               pushDiagnostics.delete(normalizedPath)
-              pullDiagnostics.delete(normalizedPath)
+              deletePullDiagnostics(normalizedPath)
               const documentGeneration = beginDocumentGeneration(normalizedPath)
               const diagnosticsStartedAt = Date.now()
               await connection.sendNotification("textDocument/didOpen", {
