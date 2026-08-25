@@ -31,14 +31,15 @@ export function createPayloadEviction<T extends EvictableStore>(store: T, setSto
   const DELETED_TOMBSTONE_LIMIT = 1024
   let active: string | undefined
   let dropMessage: (messageID: string) => void = () => {}
+  const protectedFromEviction = (sessionID: string) =>
+    sessionID === active ||
+    deps.syncingSessions.has(sessionID) ||
+    deps.hydratingSessions.has(sessionID) ||
+    evictingSessions.has(sessionID)
 
   const budget = createPayloadBudget({
     isActive: (sessionID) => sessionID === active,
-    isProtected: (sessionID) =>
-      sessionID === active ||
-      deps.syncingSessions.has(sessionID) ||
-      deps.hydratingSessions.has(sessionID) ||
-      evictingSessions.has(sessionID),
+    isProtected: protectedFromEviction,
   })
 
   function viewed(sessionID: string) {
@@ -77,15 +78,6 @@ export function createPayloadEviction<T extends EvictableStore>(store: T, setSto
       }),
     )
     deps.fullSyncedSessions.delete(sessionID)
-  }
-
-  function protectedFromEviction(sessionID: string) {
-    return (
-      sessionID === active ||
-      deps.syncingSessions.has(sessionID) ||
-      deps.hydratingSessions.has(sessionID) ||
-      evictingSessions.has(sessionID)
-    )
   }
 
   function compact() {

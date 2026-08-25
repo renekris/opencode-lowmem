@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Part } from "@opencode-ai/sdk/v2"
-import vectors from "./env-limit-vectors.json" with { type: "json" }
+import vectors from "../../core/test/env-limit-vectors.json" with { type: "json" }
 import {
   createPayloadBudget,
   parseEnvLimit,
@@ -73,8 +73,8 @@ describe("payload budget", () => {
         time: { start: 1, end: 2 },
       },
     } satisfies Part
-    const textResult = budget.preparePart("ses_1", text)
-    const toolResult = budget.preparePart("ses_1", tool)
+    const textResult = budget.preparePart("ses_1", text).part
+    const toolResult = budget.preparePart("ses_1", tool).part
 
     expect(textResult.type).toBe("text")
     if (textResult.type !== "text") return
@@ -89,6 +89,25 @@ describe("payload budget", () => {
     expect(budget.permissionInput("msg_1", "call_1")).toEqual({ filePath: "é" })
     budget.clearPermissionRequest("ses_1", "per_1")
     expect(budget.permissionInput("msg_1", "call_1")).toBeUndefined()
+  })
+
+  test("keeps a scalar at the byte cap by reference and preserves accounting bytes", () => {
+    const part = {
+      id: "prt_cap_boundary",
+      sessionID: "ses_cap_boundary",
+      messageID: "msg_cap_boundary",
+      type: "text",
+      text: "é",
+    } satisfies Part
+    const measuredBytes = serializedUtf8Bytes(part)
+    const budget = createPayloadBudget({ partIngressBytes: serializedUtf8Bytes(part.text) })
+
+    const prepared = budget.preparePart(part.sessionID, part)
+
+    expect(prepared.part).toBe(part)
+    expect(prepared.measuredBytes).toBe(measuredBytes)
+    budget.replacePart(part.messageID, part.id, part.sessionID, prepared.part, prepared.measuredBytes)
+    expect(budget.stats().evictableResident).toBe(measuredBytes)
   })
 
   test("zero disables byte and count eviction limits", () => {
@@ -260,12 +279,13 @@ describe("payload budget", () => {
     const small = { ...large, id: "prt_active_small", text: "x".repeat(1024 * 1024) } satisfies Part
     const result = budget.preparePart(large.sessionID, large)
 
-    expect(result.type).toBe("text")
-    if (result.type !== "text") return
-    expect(result.text).toContain("payload omitted by lowmem budget")
-    budget.replacePart(result.messageID, result.id, result.sessionID, result)
-    expect(budget.stats().protectedResident).toBe(serializedUtf8Bytes(result))
-    expect(budget.preparePart(small.sessionID, small)).toEqual(small)
+    expect(result.part.type).toBe("text")
+    if (result.part.type !== "text") return
+    expect(result.part.text).toContain("payload omitted by lowmem budget")
+    expect(result.part).not.toBe(large)
+    budget.replacePart(result.part.messageID, result.part.id, result.part.sessionID, result.part, result.measuredBytes)
+    expect(budget.stats().protectedResident).toBe(serializedUtf8Bytes(result.part))
+    expect(budget.preparePart(small.sessionID, small).part).toBe(small)
   })
 
   test("exact zero disables the active part cap", () => {
@@ -282,7 +302,7 @@ describe("payload budget", () => {
         text: "x".repeat(40 * 1024 * 1024),
       } satisfies Part
 
-      expect(budget.preparePart(part.sessionID, part)).toEqual(part)
+      expect(budget.preparePart(part.sessionID, part).part).toBe(part)
     } finally {
       if (previous === undefined) delete process.env[name]
       else process.env[name] = previous

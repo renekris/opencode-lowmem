@@ -545,6 +545,62 @@ test("streams deltas through the coalescing buffer", async () => {
   }
 })
 
+test("defers ordinary delta eviction until the coalesced apply", async () => {
+  const previousBudget = process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB
+  process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB = "1KB"
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(fetchFor(), tmp.path)
+
+  try {
+    const sessionID = "ses_delta_coalesced"
+    const messageID = `msg_${sessionID}_0`
+    emit(global({ id: "evt_coalesced_row", type: "session.updated", properties: { sessionID, info: row(sessionID) } }))
+    emit(
+      global({
+        id: "evt_coalesced_message",
+        type: "message.updated",
+        properties: { sessionID, info: terminalMessage(sessionID, 0) },
+      }),
+    )
+    emit(
+      global({
+        id: "evt_coalesced_part",
+        type: "message.part.updated",
+        properties: {
+          sessionID,
+          time: 1,
+          part: { id: "part_coalesced", messageID, sessionID, type: "text", text: "" },
+        },
+      }),
+    )
+    await wait(() => sync.data.part[messageID]?.length === 1)
+
+    emit(
+      global({
+        id: "evt_coalesced_delta",
+        type: "message.part.delta",
+        properties: {
+          sessionID,
+          messageID,
+          partID: "part_coalesced",
+          field: "text",
+          delta: "x".repeat(2 * 1024),
+        },
+      }),
+    )
+
+    expect(sync.data.message[sessionID]).toHaveLength(1)
+    expect(sync.data.part[messageID]?.[0]).toMatchObject({ text: "" })
+    expect(sync.payload.stats().evictions).toBe(0)
+    await wait(() => sync.data.message[sessionID] === undefined)
+  } finally {
+    app.renderer.destroy()
+    if (previousBudget === undefined) delete process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB
+    else process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB = previousBudget
+  }
+})
+
 test("session.deleted drops message and part buckets", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")

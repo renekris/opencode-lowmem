@@ -1,5 +1,5 @@
 import type { Part } from "@opencode-ai/sdk/v2"
-import { parseEnvLimit, readEnvLimit, type EnvLimitUnit } from "../util/env-limit"
+import { parseEnvLimit, readEnvLimit, type EnvLimitUnit } from "@opencode-ai/core/util/env-limit"
 
 const encoder = new TextEncoder()
 const WARNING_INTERVAL = 60_000
@@ -23,8 +23,6 @@ export type PayloadBudgetStats = {
   readonly truncations: number
   readonly permissionBytes: number
 }
-
-export type PayloadBudget = ReturnType<typeof createPayloadBudget>
 
 type PayloadBudgetOptions = {
   readonly budgetBytes?: number
@@ -79,7 +77,10 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const pending = new Map<string, StoredSize>()
   const partCallIDs = new Map<string, string>()
   const sessions = new Set<string>()
-  const permissionInputs = new Map<string, { readonly sessionID: string; readonly value: Record<string, unknown> }>()
+  const permissionInputs = new Map<
+    string,
+    { readonly sessionID: string; readonly requestKey: string; readonly value: Record<string, unknown> }
+  >()
   const permissionRequests = new Map<string, string>()
   const sessionPermissionKeys = new Map<string, Set<string>>()
   const truncatedParts = new Set<string>()
@@ -155,7 +156,13 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     refresh(sessionID)
   }
 
-  function replacePart(messageID: string, partID: string, sessionID: string, value: unknown | undefined) {
+  function replacePart(
+    messageID: string,
+    partID: string,
+    sessionID: string,
+    value: unknown | undefined,
+    measuredBytes?: number,
+  ) {
     const key = `${messageID}:${partID}`
     const previous = parts.get(key)
     if (previous) adjust(previous.sessionID, -previous.bytes)
@@ -164,7 +171,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       partCallIDs.delete(key)
       if (![...parts.keys()].some((partKey) => partKey.startsWith(`${messageID}:`))) partSessions.delete(messageID)
     } else {
-      const bytes = serializedUtf8Bytes(value)
+      const bytes = measuredBytes ?? serializedUtf8Bytes(value)
       parts.set(key, { sessionID, bytes })
       if (
         typeof value === "object" &&
@@ -260,13 +267,15 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     const sessionID = partSessions.get(messageID) ?? pending.get(messageID)?.sessionID
     if (sessionID === undefined) return
     const previous = pending.get(messageID)
+    const delta = bytes - (previous?.bytes ?? 0)
     if (previous) adjust(sessionID, -previous.bytes)
     if (bytes === 0) pending.delete(messageID)
     else {
       pending.set(messageID, { sessionID, bytes })
       adjust(sessionID, bytes)
     }
-    refresh(sessionID)
+    if (options.isProtected?.(sessionID) === true) protectedResident += delta
+    else evictableResident += delta
   }
 
   function replaceSession(
@@ -321,12 +330,17 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     for (const key of [...truncatedParts]) if (key.startsWith(`${messageID}:`)) truncatedParts.delete(key)
   }
 
-  function preparePart(sessionID: string, part: Part): Part {
+  function preparePart(sessionID: string, part: Part) {
     const key = `${part.messageID}:${part.id}`
     const scalarLimit = options.isActive?.(sessionID) === true ? activePartMaxBytes : partIngressBytes
+    const measuredBytes = serializedUtf8Bytes(part)
     if (scalarLimit === 0) {
       clearTruncated(part.messageID, part.id)
-      return part
+      return { part, measuredBytes }
+    }
+    if (measuredBytes <= scalarLimit) {
+      clearTruncated(part.messageID, part.id)
+      return { part, measuredBytes }
     }
     let result = part
     let exceeded = false
@@ -338,22 +352,35 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       return `[payload omitted by lowmem budget: ${bytes} bytes]`
     }
     switch (part.type) {
-      case "text":
-        result = { ...part, text: scalar(part.text) }
+      case "text": {
+        const text = scalar(part.text)
+        if (exceeded) result = { ...part, text }
         break
-      case "reasoning":
-        result = { ...part, text: scalar(part.text) }
+      }
+      case "reasoning": {
+        const text = scalar(part.text)
+        if (exceeded) result = { ...part, text }
         break
+      }
       case "tool":
-        if (part.state.status === "completed") result = { ...part, state: { ...part.state, output: scalar(part.state.output) } }
+        if (part.state.status === "completed") {
+          const output = scalar(part.state.output)
+          if (exceeded) result = { ...part, state: { ...part.state, output } }
+        }
         else clearTruncated(part.messageID, part.id)
         break
       case "file":
-        if (part.source) result = { ...part, source: { ...part.source, text: { ...part.source.text, value: scalar(part.source.text.value) } } }
+        if (part.source) {
+          const value = scalar(part.source.text.value)
+          if (exceeded) result = { ...part, source: { ...part.source, text: { ...part.source.text, value } } }
+        }
         else clearTruncated(part.messageID, part.id)
         break
       case "agent":
-        if (part.source) result = { ...part, source: { ...part.source, value: scalar(part.source.value) } }
+        if (part.source) {
+          const value = scalar(part.source.value)
+          if (exceeded) result = { ...part, source: { ...part.source, value } }
+        }
         else clearTruncated(part.messageID, part.id)
         break
       case "subtask":
@@ -366,10 +393,13 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
         clearTruncated(part.messageID, part.id)
         break
       default:
-        return part
+        return { part, measuredBytes }
     }
-    if (!exceeded) clearTruncated(part.messageID, part.id)
-    return result
+    if (!exceeded) {
+      clearTruncated(part.messageID, part.id)
+      return { part, measuredBytes }
+    }
+    return { part: result, measuredBytes: serializedUtf8Bytes(result) }
   }
 
   function permissionKey(messageID: string, callID: string) {
@@ -387,7 +417,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       permissionAllowanceBytes > 0 &&
       (bytes > permissionAllowanceBytes || permissionBytes + bytes > permissionMapAllowanceBytes)
     const storedValue = truncate ? truncatePermissionInput(value, bytes) : value
-    permissionInputs.set(key, { sessionID, value: storedValue })
+    permissionInputs.set(key, { sessionID, requestKey, value: storedValue })
     permissionRequests.set(requestKey, key)
     const keys = sessionPermissionKeys.get(sessionID) ?? new Set<string>()
     keys.add(key)
@@ -406,9 +436,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
       permissionBytes -= serializedUtf8Bytes(previous.value)
       permissionInputs.delete(key)
       sessionPermissionKeys.get(previous.sessionID)?.delete(key)
-    }
-    for (const [requestKey, permissionKeyValue] of permissionRequests) {
-      if (permissionKeyValue === key) permissionRequests.delete(requestKey)
+      if (permissionRequests.get(previous.requestKey) === key) permissionRequests.delete(previous.requestKey)
     }
   }
 
@@ -416,7 +444,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     const requestKey = `${sessionID}:${requestID}`
     const key = permissionRequests.get(requestKey)
     if (key) clearPermissionKey(key)
-    permissionRequests.delete(requestKey)
+    else permissionRequests.delete(requestKey)
     refresh(sessionID)
   }
 
@@ -427,7 +455,6 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   function clearPermissionSession(sessionID: string) {
     for (const key of sessionPermissionKeys.get(sessionID) ?? []) clearPermissionKey(key)
     sessionPermissionKeys.delete(sessionID)
-    for (const key of [...permissionRequests.keys()]) if (key.startsWith(`${sessionID}:`)) permissionRequests.delete(key)
   }
 
   refresh()
@@ -482,9 +509,6 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     overLimit: () =>
       (budgetBytes > 0 && evictableResident > budgetBytes) || (sessionLimit > 0 && evictableSessionCount > sessionLimit),
     warnPressure,
-    markEvicted: () => {
-      evictions++
-    },
     stats: (): PayloadBudgetStats => ({
       evictableResident,
       protectedResident,

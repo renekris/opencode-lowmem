@@ -1,4 +1,4 @@
-import { readEnvLimit } from "../util/env-limit"
+import { readEnvLimit } from "@opencode-ai/core/util/env-limit"
 
 export type PartDeltaEntry = { messageID: string; partID: string; field: string; accumulated: string }
 
@@ -22,6 +22,7 @@ export function createPartDeltaBuffer(options: DeltaBufferOptions) {
   const maxBytes = options.maxBytes ?? readEnvLimit("OPENCODE_TUI_DELTA_BUFFER_MAX_KB", "4096KB")
   const maxEntries = options.maxEntries ?? readEnvLimit("OPENCODE_TUI_DELTA_BUFFER_MAX_ENTRIES", "512", "count")
   const pending = new Map<string, PendingEntry>()
+  const pendingBytesByMessage = new Map<string, number>()
   const warn = options.warn ?? ((fields: Record<string, unknown>) => console.warn("tui part delta buffer pressure", fields))
   let timer: ReturnType<typeof setTimeout> | undefined
   let bytes = 0
@@ -29,13 +30,14 @@ export function createPartDeltaBuffer(options: DeltaBufferOptions) {
   let pressureFlushes = 0
 
   function pendingBytesForMessage(messageID: string) {
-    let total = 0
-    for (const entry of pending.values()) if (entry.messageID === messageID) total += entry.bytes
-    return total
+    return pendingBytesByMessage.get(messageID) ?? 0
   }
 
   function notify(entry: PendingEntry, nextBytes: number) {
     bytes += nextBytes - entry.bytes
+    const messageBytes = pendingBytesForMessage(entry.messageID) + nextBytes - entry.bytes
+    if (messageBytes === 0) pendingBytesByMessage.delete(entry.messageID)
+    else pendingBytesByMessage.set(entry.messageID, messageBytes)
     entry.bytes = nextBytes
     options.onPendingBytes?.(entry.messageID, pendingBytesForMessage(entry.messageID))
   }

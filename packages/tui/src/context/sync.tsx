@@ -173,27 +173,30 @@ export const {
     const payloadBudget = payloadEviction.budget
     const partDeltaBuffer = createPartDeltaBuffer({
       apply: ({ messageID, partID, field, accumulated }) => {
-        const parts = store.part[messageID]
-        if (!parts) return
-        const result = search(parts, partID, (part) => part.id)
-        if (!result.found) return
-        if (payloadBudget.isTruncated(messageID, partID)) return
-        setStore(
-          "part",
-          messageID,
-          produce((draft) => {
-            const part = draft[result.index]
-            const partField = field as keyof typeof part
-            const current = part[partField] as string | undefined
-            ;(part[partField] as string) = (current ?? "") + accumulated
-          }),
-        )
-        const updated = store.part[messageID]?.[result.index]
-        if (!updated) return
-        const prepared = payloadBudget.preparePart(updated.sessionID, updated)
-        if (prepared !== updated) setStore("part", messageID, result.index, prepared)
-        payloadBudget.replacePart(messageID, prepared.id, prepared.sessionID, prepared)
-        payloadEviction.compact()
+        try {
+          const parts = store.part[messageID]
+          if (!parts) return
+          const result = search(parts, partID, (part) => part.id)
+          if (!result.found) return
+          if (payloadBudget.isTruncated(messageID, partID)) return
+          setStore(
+            "part",
+            messageID,
+            produce((draft) => {
+              const part = draft[result.index]
+              const partField = field as keyof typeof part
+              const current = part[partField] as string | undefined
+              ;(part[partField] as string) = (current ?? "") + accumulated
+            }),
+          )
+          const updated = store.part[messageID]?.[result.index]
+          if (!updated) return
+          const prepared = payloadBudget.preparePart(updated.sessionID, updated)
+          if (prepared.part !== updated) setStore("part", messageID, result.index, prepared.part)
+          payloadBudget.replacePart(messageID, prepared.part.id, prepared.part.sessionID, prepared.part, prepared.measuredBytes)
+        } finally {
+          payloadEviction.compact()
+        }
       },
       onPendingBytes: payloadBudget.replacePendingDelta,
     })
@@ -493,18 +496,19 @@ export const {
           if (payloadEviction.isEvicted(event.properties.part.sessionID)) break
           partDeltaBuffer.dropMessage(event.properties.part.messageID)
           touchPart(event.properties.part.sessionID, event.properties.part.id)
-          const part = payloadBudget.preparePart(event.properties.part.sessionID, event.properties.part)
+          const prepared = payloadBudget.preparePart(event.properties.part.sessionID, event.properties.part)
+          const part = prepared.part
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [part])
-            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part, prepared.measuredBytes)
             payloadEviction.compact()
             break
           }
           const result = search(parts, event.properties.part.id, (part) => part.id)
           if (result.found) {
             setStore("part", event.properties.part.messageID, result.index, reconcile(part))
-            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+            payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part, prepared.measuredBytes)
             payloadEviction.compact()
             break
           }
@@ -515,7 +519,7 @@ export const {
               draft.splice(result.index, 0, part)
             }),
           )
-          payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part)
+          payloadBudget.replacePart(part.messageID, part.id, part.sessionID, part, prepared.measuredBytes)
           payloadEviction.compact()
           break
         }
@@ -533,7 +537,6 @@ export const {
             field: String(event.properties.field),
             delta: event.properties.delta,
           })
-          payloadEviction.compact()
           break
         }
 
@@ -789,7 +792,7 @@ export const {
                       ) {
                         return [current]
                       }
-                      return [payloadBudget.preparePart(sessionID, part)]
+                      return [payloadBudget.preparePart(sessionID, part).part]
                     })
                     parts.push(
                       ...currentParts.filter(
