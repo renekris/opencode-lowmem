@@ -228,7 +228,9 @@ is fork-owned files):
 - `packages/opencode/src/provider/provider.ts` — #43607 `wrapSSE` single
   deadline (guarded by `test/provider/header-timeout.test.ts`)
 - `packages/opencode/src/session/session.ts` — one-line shallow-copy in
-  `updatePart` (#35107)
+  `updatePart` (#35107), plus the `Session.fork()` legacy-summary trim that
+  strips full patches from cloned summaries before re-publishing them as new
+  durable events
 - `packages/opencode/src/session/summary.ts` — one-line write seam applying
   metadata-only trimming before the durable message update
 - `packages/opencode/src/session/summary-diff-trim.ts` — fork-owned helper that
