@@ -163,11 +163,40 @@ is fork-owned files):
   `updatePart` (#35107)
 - `packages/opencode/src/cli/cmd/run/subagent-data.ts` + `stream.transport.ts` —
   run-UI eviction (settle/revive/compact helpers; small transport delta)
-- `packages/tui/src/context/sync.tsx` — four marked `Fork(lowmem)` hunks:
-  delta-buffer wiring, inbound-rank hook + root purge, `session.deleted`
-  cleanup, eviction-gate breaks
+- `packages/tui/src/context/sync.tsx` — marked `Fork(lowmem)` hunks: delta-buffer
+  wiring + flushed-part tracking, inbound-rank hook + root purge,
+  `session.deleted` cleanup, eviction-gate breaks, budget accounting hooks
+  (append/replace/remove/part-upsert/bulk-hydration), permission-asked
+  `toolInput` capture (guarded by `test/payload-budget.test.ts`,
+  `test/no-revival.test.ts`, `test/cli/cmd/tui/sync-payload-eviction.test.tsx`)
 - `packages/tui/src/routes/session/index.tsx`, `subagent-footer.tsx` —
   conveyor call-site injections only
+
+**RAM-bounds seams** (rounds 1–2, same rules — re-check each on rebase):
+
+- `packages/core/src/event.ts` — codec WeakMap cache + two-phase byte-aware
+  `readAfter` paging (`test/durable-paging.test.ts`, `test/event.test.ts`)
+- `packages/core/src/background-job.ts` — terminal ring + settled contract +
+  late-caller `waitForPromotion` (`test/background-job-settled.test.ts`)
+- `packages/opencode/src/cli/cmd/db.ts` — stats partial port + wiring; fork
+  vacuum guard lives in fork-owned `db-vacuum.ts` (`test/db-cmd.test.ts`)
+- `packages/opencode/src/lsp/client.ts` — lifecycle coordination: bounded
+  close-tombstones, per-open generation tokens, oversized transient close,
+  deferred single-flight loader (`test/lsp-reopen.test.ts`,
+  `test/document-store.test.ts`)
+- `packages/opencode/src/permission/index.ts` + `session/tools.ts` — preserve
+  and populate `toolInput` on `permission.asked` (same tests as schema row)
+- `packages/schema/src/v1/permission.ts` — optional typed `toolInput` field
+  (contract test in `packages/sdk/js`; schema manifest count intentionally
+  shifts — pre-existing failures documented in the round-1 evidence)
+- `packages/tui/src/context/data.tsx` — mirror-budget wiring; implementation
+  is fork-owned `context/mirror-budget.ts` (`test/mirror-budget.test.tsx`)
+- `packages/tui/src/plugin/adapters.tsx` — `requestRevival` call-sites removed
+  (no-revival rule; `test/no-revival.test.ts`)
+- `packages/tui/src/routes/session/permission.tsx` — reads `toolInput` from the
+  permission map (store copy is stripped; same payload-budget tests)
+- `packages/sdk/js/src/v2/gen/*` — REGENERATED via `bun run generate`
+  (packages/client) for the `toolInput` surface; never hand-edited
 
 **Watch-list** (adopt upstream if merged, replacing our port): #39970
 (comprehensive stream-incomplete handling, supersedes #43881/#43607), #41466
