@@ -1,19 +1,23 @@
 import { describe, expect } from "bun:test"
-import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Layer } from "effect"
-import { open } from "node:fs/promises"
+import { Effect } from "effect"
+import { copyFile, open } from "node:fs/promises"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { cliIt } from "./lib/cli-process"
 
 type SqliteDatabase = import("bun:sqlite").Database
 type SqliteBindings = import("bun:sqlite").SQLQueryBindings
 
 async function createFixtureDatabase(filename: string) {
-  await Effect.runPromise(Effect.scoped(Layer.build(Database.layerFromPath(filename))))
-
   const { Database: SqliteDatabase } = await import("bun:sqlite")
   const db = new SqliteDatabase(filename)
   try {
+    db.run("CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, name TEXT, time_created INTEGER, time_updated INTEGER, sandboxes TEXT)")
+    db.run("CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, slug TEXT, directory TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER)")
+    db.run("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+    db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+    db.run("CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INTEGER)")
+    db.run("CREATE TABLE event (id TEXT PRIMARY KEY, aggregate_id TEXT, seq INTEGER, type TEXT, data TEXT)")
     db.run(
       "INSERT INTO project (id, worktree, name, time_created, time_updated, sandboxes) VALUES ('project-test', '/tmp/opencode-test', 'Test project', 1, 2, '[]')",
     )
@@ -30,7 +34,6 @@ async function createFixtureDatabase(filename: string) {
     db.run(
       "INSERT INTO event (id, aggregate_id, seq, type, data) VALUES ('event-test', 'session-test', 1, 'session.created', '{\"sessionID\":\"session-test\"}')",
     )
-    db.run("PRAGMA wal_checkpoint(TRUNCATE)")
   } finally {
     db.close()
   }
@@ -44,8 +47,8 @@ async function createBloatedFixtureDatabase(filename: string) {
   try {
     db.run("CREATE TABLE vacuum_fixture (value TEXT)")
     const insert = db.query("INSERT INTO vacuum_fixture (value) VALUES (?)")
-    for (const index of Array.from({ length: 512 }, (_, value) => value)) {
-      insert.run(`${index}${"x".repeat(8192)}`)
+    for (const index of Array.from({ length: 128 }, (_, value) => value)) {
+      insert.run(`${index}${"x".repeat(4096)}`)
     }
     db.run("DELETE FROM vacuum_fixture")
     db.run("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -55,7 +58,7 @@ async function createBloatedFixtureDatabase(filename: string) {
 }
 
 async function createSidecarFixtureDatabase(filename: string, sourceFilename: string) {
-  await Bun.write(filename, await Bun.file(sourceFilename).arrayBuffer())
+  await copyFile(sourceFilename, filename)
   const { Database: SqliteDatabase } = await import("bun:sqlite")
   const db = new SqliteDatabase(filename)
   db.run("PRAGMA journal_mode=WAL")
@@ -66,8 +69,11 @@ async function createSidecarFixtureDatabase(filename: string, sourceFilename: st
 }
 
 async function readFixtureExpectations(filename: string) {
-  const { Database: SqliteDatabase } = await import("bun:sqlite")
-  const db = new SqliteDatabase(filename, { readonly: true })
+  const { Database: SqliteDatabase, constants } = await import("bun:sqlite")
+  const db = new SqliteDatabase(
+    `${pathToFileURL(filename).href}?immutable=1`,
+    constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+  )
   try {
     return {
       pageSize: readNumber(db, "PRAGMA page_size", "page_size"),
@@ -95,7 +101,7 @@ function readNumber(database: SqliteDatabase, query: string, key: string) {
 
 async function snapshotDatabaseFiles(filename: string) {
   return Promise.all(
-    ["", "-wal", "-shm"].map(async (suffix) => {
+    ["", "-wal", "-shm", "-journal"].map(async (suffix) => {
       const filePath = `${filename}${suffix}`
       const file = Bun.file(filePath)
       const exists = await file.exists()
@@ -115,8 +121,8 @@ async function snapshotDatabaseFiles(filename: string) {
 describe("opencode db stats", () => {
   cliIt.live("reports read-only database statistics as a table", ({ home, opencode }) =>
     Effect.gen(function* () {
-      const sourceFilename = path.join(home, "fixture.sqlite")
-      const filename = path.join(home, "fixture-stable.sqlite")
+      const sourceFilename = path.join(home, "stats-source.sqlite")
+      const filename = path.join(home, "stats-sidecar.sqlite")
       yield* Effect.promise(() => createFixtureDatabase(sourceFilename))
       const keeper = yield* Effect.promise(() => createSidecarFixtureDatabase(filename, sourceFilename))
       try {
@@ -147,9 +153,11 @@ describe("opencode db stats", () => {
 
   cliIt.live("reports machine-readable database statistics with --json", ({ home, opencode }) =>
     Effect.gen(function* () {
-      const filename = path.join(home, "fixture.sqlite")
+      const filename = path.join(home, "stats-json.sqlite")
       yield* Effect.promise(() => createFixtureDatabase(filename))
       const expected = yield* Effect.promise(() => readFixtureExpectations(filename))
+      const before = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
+      expect(before.slice(1).every((file) => !file.exists)).toBe(true)
 
       const result = yield* opencode.spawn(["db", "stats", "--json"], {
         env: { OPENCODE_DB: filename, OPENCODE_DISABLE_CHANNEL_DB: "1" },
@@ -176,6 +184,10 @@ describe("opencode db stats", () => {
           ]),
         }),
       )
+
+      const after = yield* Effect.promise(() => snapshotDatabaseFiles(filename))
+      expect(after).toEqual(before)
+      expect(after.slice(1).every((file) => !file.exists)).toBe(true)
     }),
   )
 
@@ -223,7 +235,7 @@ describe("opencode db stats", () => {
 describe("opencode db vacuum", () => {
   cliIt.live("refuses when the exclusive lock is unavailable", ({ home, opencode }) =>
     Effect.gen(function* () {
-      const filename = path.join(home, "fixture.sqlite")
+      const filename = path.join(home, "vacuum-locked.sqlite")
       yield* Effect.promise(() => createFixtureDatabase(filename))
       const { Database: SqliteDatabase } = yield* Effect.promise(() => import("bun:sqlite"))
       const blocker = new SqliteDatabase(filename)
@@ -245,9 +257,9 @@ describe("opencode db vacuum", () => {
   if (process.platform === "linux") {
     cliIt.live("refuses when proc detects a live database handle", ({ home, opencode }) =>
       Effect.gen(function* () {
-        const filename = path.join(home, "fixture.sqlite")
+        const filename = path.join(home, "vacuum-live-handle.sqlite")
         yield* Effect.promise(() => createFixtureDatabase(filename))
-        const handle = yield* Effect.promise(() => open(filename, "r"))
+        const rawHandle = yield* Effect.promise(() => open(filename, "r"))
         try {
           const result = yield* opencode.spawn(["db", "vacuum"], {
             env: { OPENCODE_DB: filename, OPENCODE_DISABLE_CHANNEL_DB: "1" },
@@ -256,7 +268,7 @@ describe("opencode db vacuum", () => {
           opencode.expectExit(result, 1, "db vacuum proc live handle")
           expect(result.stderr).toContain(`live process ${process.pid}`)
         } finally {
-          yield* Effect.promise(() => handle.close())
+          yield* Effect.promise(() => rawHandle.close())
         }
       }),
     )
@@ -264,7 +276,7 @@ describe("opencode db vacuum", () => {
 
   cliIt.live("reclaims free pages from a bloated database", ({ home, opencode }) =>
     Effect.gen(function* () {
-      const filename = path.join(home, "bloated.sqlite")
+      const filename = path.join(home, "vacuum-bloated.sqlite")
       yield* Effect.promise(() => createBloatedFixtureDatabase(filename))
       const before = yield* Effect.promise(() => readFixtureExpectations(filename))
       expect(before.freelistCount).toBeGreaterThan(0)

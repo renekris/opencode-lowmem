@@ -1,8 +1,7 @@
 import type { Argv } from "yargs"
 import { spawn } from "child_process"
-import { mkdtemp, readdir, readlink, realpath, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { readdir, readlink, realpath } from "node:fs/promises"
+import { pathToFileURL } from "node:url"
 import { Database } from "@opencode-ai/core/database/database"
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
@@ -121,45 +120,42 @@ async function readDatabaseStats(filename: string): Promise<DatabaseStats> {
   if (filename !== ":memory:" && !(await Bun.file(filename).exists())) {
     throw new Error(`Cannot read database: file does not exist: ${filename}`)
   }
-  const { Database: SqliteDatabase } = await import("bun:sqlite")
-  const temporaryDirectory = filename === ":memory:" ? undefined : await mkdtemp(join(tmpdir(), "opencode-db-stats-"))
+  const { Database: SqliteDatabase, constants } = await import("bun:sqlite")
+  const database =
+    filename === ":memory:"
+      ? new SqliteDatabase(filename)
+      : new SqliteDatabase(
+          // Bun 1.3.14 rejects file: URIs unless SQLITE_OPEN_URI is passed
+          // (SQLITE_CANTOPEN otherwise); the flag is load-bearing, not optional.
+          `${pathToFileURL(filename).href}?immutable=1`,
+          constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+        )
   try {
-    const sqliteFilename = temporaryDirectory ? join(temporaryDirectory, "database.sqlite") : filename
-    if (temporaryDirectory) {
-      await Bun.write(sqliteFilename, await Bun.file(filename).arrayBuffer())
-      const wal = Bun.file(`${filename}-wal`)
-      if (await wal.exists()) await Bun.write(`${sqliteFilename}-wal`, await wal.arrayBuffer())
-    }
-    const database = new SqliteDatabase(sqliteFilename, filename === ":memory:" ? undefined : { readonly: true })
-    try {
-      const pageSize = readPragma(database, "page_size")
-      const pageCount = readPragma(database, "page_count")
-      const freelistCount = readPragma(database, "freelist_count")
-      const tableNames = database
-        .query<
-          { name: string },
-          SqliteBindings[]
-        >("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .all()
-      const tables = tableNames.map((table) => readTableStats(database, table.name))
+    const pageSize = readPragma(database, "page_size")
+    const pageCount = readPragma(database, "page_count")
+    const freelistCount = readPragma(database, "freelist_count")
+    const tableNames = database
+      .query<
+        { name: string },
+        SqliteBindings[]
+      >("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all()
+    const tables = tableNames.map((table) => readTableStats(database, table.name))
 
-      return {
-        databasePath: filename,
-        pageSize,
-        pageCount,
-        freelistCount,
-        databaseBytes: pageSize * pageCount,
-        fileBytes: filename === ":memory:" ? 0 : Bun.file(filename).size,
-        walBytes: filename === ":memory:" ? 0 : Bun.file(`${filename}-wal`).size,
-        approximateBytesMethod:
-          "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size)",
-        tables,
-      }
-    } finally {
-      database.close()
+    return {
+      databasePath: filename,
+      pageSize,
+      pageCount,
+      freelistCount,
+      databaseBytes: pageSize * pageCount,
+      fileBytes: filename === ":memory:" ? 0 : Bun.file(filename).size,
+      walBytes: filename === ":memory:" ? 0 : Bun.file(`${filename}-wal`).size,
+      approximateBytesMethod:
+        "sum of CAST(column AS BLOB) UTF-8 cell lengths (logical payload estimate, not physical table/index size)",
+      tables,
     }
   } finally {
-    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true })
+    database.close()
   }
 }
 
