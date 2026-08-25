@@ -132,6 +132,65 @@ describe("DocumentStore", () => {
     ])
   })
 
+  test("caps metadata-only documents and reopens rolled-out documents with full content", async () => {
+    const store = DocumentStore.create({
+      documentLimit: 0,
+      documentMaxBytes: 0,
+      documentOpenAllowanceBytes: 1,
+      oversizedDocumentLimit: 2,
+    })
+    const events: string[] = []
+    store.onEvict(({ path }) => {
+      events.push(`close:${path}`)
+    })
+    const paths = ["/tmp/oversized-a.ts", "/tmp/oversized-b.ts", "/tmp/oversized-c.ts", "/tmp/oversized-d.ts"]
+
+    for (const documentPath of paths) {
+      await store.open(documentPath, "xx", (event) => {
+        events.push(`${event.kind}:${event.document.path}:${event.text}`)
+      })
+      expect(store.stats().metadataOnly).toBeLessThanOrEqual(2)
+    }
+
+    expect(events).toEqual([
+      "open:/tmp/oversized-a.ts:xx",
+      "open:/tmp/oversized-b.ts:xx",
+      "close:/tmp/oversized-a.ts",
+      "open:/tmp/oversized-c.ts:xx",
+      "close:/tmp/oversized-b.ts",
+      "open:/tmp/oversized-d.ts:xx",
+    ])
+    expect(store.stats()).toMatchObject({ count: 0, bytes: 0, metadataOnly: 2 })
+    expect(store.has(paths[0])).toBe(false)
+    expect(store.has(paths[1])).toBe(false)
+    expect(store.has(paths[2])).toBe(true)
+    expect(store.has(paths[3])).toBe(true)
+
+    expect(await store.touch(paths[0])).toBeUndefined()
+    await store.open(paths[0], "fresh", (event) => {
+      events.push(`${event.kind}:${event.document.path}:${event.text}`)
+    })
+
+    expect(events.at(-1)).toBe("open:/tmp/oversized-a.ts:fresh")
+    expect(events.some((event) => event.startsWith("change:"))).toBe(false)
+    expect(store.stats().metadataOnly).toBe(2)
+  })
+
+  test("exact zero disables the oversized document ceiling", async () => {
+    const store = DocumentStore.create({
+      documentLimit: 0,
+      documentMaxBytes: 0,
+      documentOpenAllowanceBytes: 1,
+      oversizedDocumentLimit: 0,
+    })
+
+    await store.open("/tmp/oversized-a.ts", "xx")
+    await store.open("/tmp/oversized-b.ts", "xx")
+    await store.open("/tmp/oversized-c.ts", "xx")
+
+    expect(store.stats().metadataOnly).toBe(3)
+  })
+
   test("does not count the document while its open notification is in flight", async () => {
     const store = DocumentStore.create({
       documentLimit: 1,

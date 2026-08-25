@@ -56,6 +56,7 @@ type Options = {
   readonly documentLimit?: number
   readonly documentMaxBytes?: number
   readonly documentOpenAllowanceBytes?: number
+  readonly oversizedDocumentLimit?: number
   readonly warn?: WarningHandler
 }
 
@@ -99,6 +100,8 @@ export function create(options: Options = {}): Interface {
   const documentOpenAllowanceBytes =
     options.documentOpenAllowanceBytes ??
     EnvLimit.readEnvLimit("OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB", "32MB", "bytes")
+  const oversizedDocumentLimit =
+    options.oversizedDocumentLimit ?? EnvLimit.readEnvLimit("OPENCODE_LSP_OVERSIZED_LIMIT", "8", "count")
   const documents = new Map<string, StoredDocument>()
   const listeners = new Set<EvictListener>()
   const serial = new Map<string, Promise<void>>()
@@ -198,16 +201,28 @@ export function create(options: Options = {}): Interface {
       const openingBytes = opening?.metadataOnly === false ? opening.byteLength : 0
       const overCount = documentLimit > 0 && current.count + openingCount > documentLimit
       const overBytes = documentMaxBytes > 0 && current.bytes + openingBytes > documentMaxBytes
-      if (!overCount && !overBytes) return
-      const candidate = [...documents.entries()].find(
-        ([documentPath, item]) =>
-          documentPath !== protectedPath && item.state === "open" && !item.document.metadataOnly,
-      )
-      if (!candidate) return
-      const didEvict = await runSerialized(candidate[0], () => evict(candidate[0], candidate[1]))
+      const overOversized = oversizedDocumentLimit > 0 && current.metadataOnly > oversizedDocumentLimit
+      if (!overCount && !overBytes && !overOversized) return
+      const candidates = [...documents.entries()]
+      const candidate =
+        overCount || overBytes
+          ? candidates.find(
+              ([documentPath, item]) =>
+                documentPath !== protectedPath && item.state === "open" && !item.document.metadataOnly,
+            )
+          : undefined
+      const oversizedCandidate = overOversized
+        ? candidates.find(
+            ([documentPath, item]) =>
+              documentPath !== protectedPath && item.state === "open" && item.document.metadataOnly,
+          )
+        : undefined
+      const selected = candidate ?? oversizedCandidate
+      if (!selected) return
+      const didEvict = await runSerialized(selected[0], () => evict(selected[0], selected[1]))
       if (!didEvict) continue
       evictions++
-      reportPressure(candidate[0])
+      reportPressure(selected[0])
     }
   }
   const open = async (

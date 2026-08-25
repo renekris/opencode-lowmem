@@ -11,6 +11,7 @@ const SERVER = String.raw`
 let buffer = Buffer.alloc(0)
 let nextId = 1
 const events = []
+const openDocuments = new Map()
 
 function encode(message) {
   const json = JSON.stringify(message)
@@ -29,6 +30,15 @@ function notify(method, params) {
   send({ jsonrpc: "2.0", method, params })
 }
 
+function diagnosticsFor(uri) {
+  const text = openDocuments.get(uri)
+  if (text === undefined) return []
+  return [{
+    message: "analyzed:" + text,
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+  }]
+}
+
 function handle(message) {
   if (message.method === "initialize") {
     respond(message.id, { capabilities: { textDocumentSync: { change: 2 } } })
@@ -38,12 +48,44 @@ function handle(message) {
     respond(message.id, events)
     return
   }
+  if (message.method === "test/diagnostics") {
+    respond(message.id, diagnosticsFor(message.params.uri))
+    return
+  }
+  if (message.method === "test/references") {
+    respond(message.id, openDocuments.has(message.params.uri) ? [{ uri: message.params.uri }] : [])
+    return
+  }
   if (message.method === "test/publish") {
-    notify("textDocument/publishDiagnostics", message.params)
+    notify("textDocument/publishDiagnostics", {
+      ...message.params,
+      diagnostics: openDocuments.has(message.params.uri) ? message.params.diagnostics : [],
+    })
     respond(message.id, null)
     return
   }
-  if (message.method === "textDocument/didOpen" || message.method === "textDocument/didChange" || message.method === "textDocument/didClose" || message.method === "workspace/didChangeWatchedFiles") {
+  if (message.method === "textDocument/didOpen") {
+    openDocuments.set(message.params.textDocument.uri, message.params.textDocument.text)
+    events.push({ method: message.method, params: message.params })
+    notify("textDocument/publishDiagnostics", {
+      uri: message.params.textDocument.uri,
+      version: message.params.textDocument.version,
+      diagnostics: diagnosticsFor(message.params.textDocument.uri),
+    })
+    return
+  }
+  if (message.method === "textDocument/didChange") {
+    const changes = message.params.contentChanges
+    openDocuments.set(message.params.textDocument.uri, changes.at(-1).text)
+    events.push({ method: message.method, params: message.params })
+    return
+  }
+  if (message.method === "textDocument/didClose") {
+    openDocuments.delete(message.params.textDocument.uri)
+    events.push({ method: message.method, params: message.params })
+    return
+  }
+  if (message.method === "workspace/didChangeWatchedFiles") {
     events.push({ method: message.method, params: message.params })
     return
   }
@@ -210,6 +252,66 @@ describe("LSP document reopen behavior", () => {
             expect(events[0]?.params?.textDocument?.text).toHaveLength(2_049)
             expect(events[2]?.params?.textDocument?.text).toBe("small\n")
             expect(events.some((event) => event.method === "workspace/didChangeWatchedFiles")).toBe(false)
+            await client.shutdown()
+          },
+        }),
+    )
+  }, { timeout: 15_000 })
+
+  test("re-analyzes a document after LRU eviction discards server state", async () => {
+    await using tmp = await tmpdir({
+      init: async (directory) => {
+        const serverPath = path.join(directory, "fake-lsp-server.js")
+        await Bun.write(serverPath, SERVER)
+        await Bun.write(path.join(directory, "first.ts"), "first\n")
+        await Bun.write(path.join(directory, "second.ts"), "second\n")
+        return serverPath
+      },
+    })
+
+    await withLimits(
+      {
+        OPENCODE_LSP_DOC_LIMIT: "1",
+        OPENCODE_LSP_DOC_MAX_MB: "64MB",
+        OPENCODE_LSP_DOC_OPEN_ALLOWANCE_MB: "2KB",
+      },
+      async () =>
+        withTestInstance({
+          directory: tmp.path,
+          fn: async (ctx) => {
+            const client = await LSPClient.create({
+              serverID: "fake",
+              server: spawnFakeServer(tmp.extra),
+              root: tmp.path,
+              directory: tmp.path,
+              instance: ctx,
+            })
+            const first = path.join(tmp.path, "first.ts")
+            const second = path.join(tmp.path, "second.ts")
+            const firstUri = pathToFileURL(first).href
+
+            await client.notify.open({ path: first })
+            await client.connection.sendRequest("test/diagnostics", { uri: firstUri })
+            expect(client.diagnostics.get(first)?.[0]?.message).toBe("analyzed:first\n")
+
+            await client.notify.open({ path: second })
+            expect(await client.connection.sendRequest<unknown[]>("test/diagnostics", { uri: firstUri })).toEqual([])
+            expect(await client.connection.sendRequest<unknown[]>("test/references", { uri: firstUri })).toEqual([])
+            expect(client.diagnostics.has(first)).toBe(false)
+
+            await client.notify.open({ path: first })
+            await client.connection.sendRequest("test/diagnostics", { uri: firstUri })
+            expect(client.diagnostics.get(first)?.[0]?.message).toBe("analyzed:first\n")
+            expect(await client.connection.sendRequest<unknown[]>("test/references", { uri: firstUri })).toEqual([
+              { uri: firstUri },
+            ])
+
+            const events = await eventsFor(client)
+            expect(
+              events
+                .filter((event) => event.method === "textDocument/didOpen")
+                .map((event) => event.params?.textDocument?.text),
+            ).toEqual(["first\n", "second\n", "first\n"])
             await client.shutdown()
           },
         }),
