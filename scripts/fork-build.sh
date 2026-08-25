@@ -1,21 +1,5 @@
 #!/usr/bin/env bash
 # fork-build.sh — build the resource-bounded opencode fork with a correct version stamp.
-#
-# What it does:
-#   1. Derives the version stamp: <upstream-base>-<FLAVOR>.<round>, where <round> counts
-#      prior builds of this base (tracked as local git tags) plus one.
-#   2. Builds every platform target from packages/opencode.
-#   3. Smoke-tests the linux-x64 binary's --version against the stamp.
-#   4. Tags the repo so the next build increments the round.
-#   5. Ensures ~/.opencode/bin/opencode execs this checkout's dist binary
-#      (writes the shim only if missing; existing mismatches are a hard gate).
-#
-# It never kills running opencode sessions: sessions exec the binary at launch, so a
-# rebuild is picked up only by newly started sessions.
-#
-# FLAVOR rationale: "lowmem" states the fork's benefit literally — same features, less
-# memory/disk waste (Debian lowmem-kernel heritage). Rejected alternates: bounded, capped
-# (too abstract), lean, efficient, mem, slim/lite (collide with oh-my-opencode-* names).
 set -euo pipefail
 
 FLAVOR="lowmem"
