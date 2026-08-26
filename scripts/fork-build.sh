@@ -9,7 +9,9 @@ PLATFORM_BIN="dist/opencode-linux-x64/bin/opencode"
 
 cd "$ROOT"
 
-BASE="$(git describe --tags --abbrev=0 2>/dev/null | sed -e 's/^v//' -e "s/-${FLAVOR}\.[0-9]*\$//")"
+# Exclude fork tags: after a fresh upstream merge the previous fork tag can tie
+# the new upstream tag on commit distance with a newer date, winning describe.
+BASE="$(git describe --tags --abbrev=0 --exclude "*-${FLAVOR}.*" 2>/dev/null | sed -e 's/^v//' -e "s/-${FLAVOR}\.[0-9]*\$//")"
 if [[ -z "$BASE" || "$BASE" == *"-${FLAVOR}"* ]]; then
   echo "fork-build: cannot determine upstream base tag from $(git describe --tags --abbrev=0 2>/dev/null || echo '<none>')" >&2
   exit 1
