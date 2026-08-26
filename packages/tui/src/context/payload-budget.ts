@@ -42,64 +42,6 @@ type PayloadBudgetOptions = {
 }
 
 type StoredSize = { readonly sessionID: string; readonly bytes: number }
-type AppendablePart = Extract<Part, { readonly type: "text" | "reasoning" }>
-
-function jsonStringContentBytes(value: string, start = 0) {
-  let bytes = 0
-  for (let index = start; index < value.length; index++) {
-    const code = value.charCodeAt(index)
-    if (
-      code === 0x22 ||
-      code === 0x5c ||
-      code === 0x08 ||
-      code === 0x09 ||
-      code === 0x0a ||
-      code === 0x0c ||
-      code === 0x0d
-    ) {
-      bytes += 2
-      continue
-    }
-    if (code < 0x20) {
-      bytes += 6
-      continue
-    }
-    if (code <= 0x7f) {
-      bytes += 1
-      continue
-    }
-    if (code <= 0x7ff) {
-      bytes += 2
-      continue
-    }
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1)
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4
-        index++
-        continue
-      }
-      bytes += 6
-      continue
-    }
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      bytes += 6
-      continue
-    }
-    bytes += 3
-  }
-  return bytes
-}
-
-function jsonStringAppendBytes(previousText: string, appendedText: string) {
-  if (appendedText.length === 0) return 0
-  const previousLast = previousText.charCodeAt(previousText.length - 1)
-  const appendedFirst = appendedText.charCodeAt(0)
-  if (previousLast >= 0xd800 && previousLast <= 0xdbff && appendedFirst >= 0xdc00 && appendedFirst <= 0xdfff) {
-    return -2 + jsonStringContentBytes(appendedText, 1)
-  }
-  return jsonStringContentBytes(appendedText)
-}
 
 const permissionDisplayFields: ReadonlySet<string> = new Set([
   "filePath",
@@ -128,13 +70,14 @@ export function truncatedPermissionInput() {
 export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   const budgetBytes = options.budgetBytes ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_BUDGET_MB", "256MB")
   const sessionLimit = options.sessionLimit ?? readEnvLimit("OPENCODE_TUI_PAYLOAD_SESSION_LIMIT", "20", "count")
-  const activeAllowanceBytes = options.activeAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_ALLOWANCE_MB", "128MB")
-  const activePartMaxBytes = options.activePartMaxBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_PART_MAX_MB", "32MB")
+  const activeAllowanceBytes =
+    options.activeAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_ALLOWANCE_MB", "128MB")
+  const activePartMaxBytes =
+    options.activePartMaxBytes ?? readEnvLimit("OPENCODE_TUI_ACTIVE_PART_MAX_MB", "32MB")
   const permissionAllowanceBytes =
     options.permissionAllowanceBytes ?? readEnvLimit("OPENCODE_TUI_PERMISSION_ALLOWANCE_MB", "32MB")
   const permissionMapAllowanceBytes = permissionAllowanceBytes * 2
-  const permissionInputLimit =
-    options.permissionInputLimit ?? readEnvLimit("OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES", "512", "count")
+  const permissionInputLimit = options.permissionInputLimit ?? readEnvLimit("OPENCODE_TUI_PERMISSION_INPUT_MAX_ENTRIES", "512", "count")
   const partIngressBytes = options.partIngressBytes ?? readEnvLimit("OPENCODE_TUI_PART_INGRESS_MAX_KB", "256KB")
   const messages = new Map<string, StoredSize>()
   const parts = new Map<string, StoredSize>()
@@ -198,8 +141,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     const now = options.now?.() ?? Date.now()
     if (now - lastWarning < WARNING_INTERVAL) return
     lastWarning = now
-    const warn =
-      options.warn ?? ((fields: Record<string, unknown>) => console.warn("tui payload budget pressure", fields))
+    const warn = options.warn ?? ((fields: Record<string, unknown>) => console.warn("tui payload budget pressure", fields))
     warn({
       component: "tui.payload",
       budget: "OPENCODE_TUI_PAYLOAD_BUDGET_MB",
@@ -297,8 +239,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
   }
 
   function removeParts(messageID: string) {
-    const sessionID =
-      [...parts].find(([key]) => key.startsWith(`${messageID}:`))?.[1].sessionID ?? pending.get(messageID)?.sessionID
+    const sessionID = [...parts].find(([key]) => key.startsWith(`${messageID}:`))?.[1].sessionID ?? pending.get(messageID)?.sessionID
     for (const [key, value] of parts) {
       if (!key.startsWith(`${messageID}:`)) continue
       adjust(value.sessionID, -value.bytes)
@@ -464,19 +405,22 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
         if (part.state.status === "completed") {
           const output = scalar(part.state.output)
           if (exceeded) result = { ...part, state: { ...part.state, output } }
-        } else clearTruncated(part.messageID, part.id)
+        }
+        else clearTruncated(part.messageID, part.id)
         break
       case "file":
         if (part.source) {
           const value = scalar(part.source.text.value)
           if (exceeded) result = { ...part, source: { ...part.source, text: { ...part.source.text, value } } }
-        } else clearTruncated(part.messageID, part.id)
+        }
+        else clearTruncated(part.messageID, part.id)
         break
       case "agent":
         if (part.source) {
           const value = scalar(part.source.value)
           if (exceeded) result = { ...part, source: { ...part.source, value } }
-        } else clearTruncated(part.messageID, part.id)
+        }
+        else clearTruncated(part.messageID, part.id)
         break
       case "subtask":
       case "step-start":
@@ -497,29 +441,11 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     return { part: result, measuredBytes: serializedUtf8Bytes(result) }
   }
 
-  function preparePartAppend(sessionID: string, previousPart: AppendablePart, appendedText: string) {
-    const part = { ...previousPart, text: previousPart.text + appendedText }
-    const key = `${part.messageID}:${part.id}`
-    const previous = parts.get(key)
-    if (!previous || previous.sessionID !== sessionID || truncatedParts.has(key)) return preparePart(sessionID, part)
-    const measuredBytes = previous.bytes + jsonStringAppendBytes(previousPart.text, appendedText)
-    const scalarLimit = options.isActive?.(sessionID) === true ? activePartMaxBytes : partIngressBytes
-    if (scalarLimit > 0 && measuredBytes > scalarLimit) return preparePart(sessionID, part)
-    clearTruncated(part.messageID, part.id)
-    return { part, measuredBytes }
-  }
-
   function permissionKey(messageID: string, callID: string) {
     return `${messageID}:${callID}`
   }
 
-  function setPermissionInput(
-    sessionID: string,
-    requestID: string,
-    messageID: string,
-    callID: string,
-    value: Record<string, unknown>,
-  ) {
+  function setPermissionInput(sessionID: string, requestID: string, messageID: string, callID: string, value: Record<string, unknown>) {
     const key = permissionKey(messageID, callID)
     const requestKey = `${sessionID}:${requestID}`
     const previousKey = permissionRequests.get(requestKey)
@@ -629,13 +555,11 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     removeSession,
     replacePendingDelta,
     preparePart,
-    preparePartAppend,
     isTruncated: (messageID: string, partID: string) => truncatedParts.has(`${messageID}:${partID}`),
     markDeltaPart: (messageID: string, partID: string) => deltaParts.add(`${messageID}:${partID}`),
     hasDeltaPart: (messageID: string, partID: string) => deltaParts.has(`${messageID}:${partID}`),
     setPermissionInput,
-    permissionInput: (messageID: string, callID: string) =>
-      permissionInputs.get(permissionKey(messageID, callID))?.value,
+    permissionInput: (messageID: string, callID: string) => permissionInputs.get(permissionKey(messageID, callID))?.value,
     clearPermissionRequest,
     clearPermissionForMessage,
     clearPermissionSession,
@@ -654,8 +578,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     sessionBytes: (sessionID: string) => resident.get(sessionID) ?? 0,
     refresh,
     overLimit: () =>
-      (budgetBytes > 0 && evictableResident > budgetBytes) ||
-      (sessionLimit > 0 && evictableSessionCount > sessionLimit),
+      (budgetBytes > 0 && evictableResident > budgetBytes) || (sessionLimit > 0 && evictableSessionCount > sessionLimit),
     warnPressure,
     stats: (): PayloadBudgetStats => ({
       evictableResident,

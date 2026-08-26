@@ -174,8 +174,7 @@ export const {
     const payloadBudget = payloadEviction.budget
     const trackPermissionRequests = (sessionID: string) =>
       payloadBudget.replacePermissionRequests(sessionID, store.permission[sessionID])
-    const trackQuestionRequests = (sessionID: string) =>
-      payloadBudget.replaceQuestionRequests(sessionID, store.question[sessionID])
+    const trackQuestionRequests = (sessionID: string) => payloadBudget.replaceQuestionRequests(sessionID, store.question[sessionID])
     const partDeltaBuffer = createPartDeltaBuffer({
       apply: ({ messageID, partID, field, accumulated }) => {
         try {
@@ -184,20 +183,6 @@ export const {
           const result = search(parts, partID, (part) => part.id)
           if (!result.found) return
           if (payloadBudget.isTruncated(messageID, partID)) return
-          const previous = parts[result.index]
-          if (field === "text" && (previous.type === "text" || previous.type === "reasoning")) {
-            const prepared = payloadBudget.preparePartAppend(previous.sessionID, previous, accumulated)
-            setStore("part", messageID, result.index, prepared.part)
-            payloadBudget.replacePart(
-              messageID,
-              prepared.part.id,
-              prepared.part.sessionID,
-              prepared.part,
-              prepared.measuredBytes,
-            )
-            payloadBudget.markDeltaPart(messageID, prepared.part.id)
-            return
-          }
           setStore(
             "part",
             messageID,
@@ -212,13 +197,7 @@ export const {
           if (!updated) return
           const prepared = payloadBudget.preparePart(updated.sessionID, updated)
           if (prepared.part !== updated) setStore("part", messageID, result.index, prepared.part)
-          payloadBudget.replacePart(
-            messageID,
-            prepared.part.id,
-            prepared.part.sessionID,
-            prepared.part,
-            prepared.measuredBytes,
-          )
+          payloadBudget.replacePart(messageID, prepared.part.id, prepared.part.sessionID, prepared.part, prepared.measuredBytes)
           payloadBudget.markDeltaPart(messageID, prepared.part.id)
         } finally {
           payloadEviction.compact()
@@ -455,22 +434,14 @@ export const {
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
-            payloadBudget.replaceMessage(
-              event.properties.info.sessionID,
-              event.properties.info.id,
-              event.properties.info,
-            )
+            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
             payloadEviction.compact()
             break
           }
           const result = search(messages, messageKey(event.properties.info), messageKey)
           if (result.found) {
             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
-            payloadBudget.replaceMessage(
-              event.properties.info.sessionID,
-              event.properties.info.id,
-              event.properties.info,
-            )
+            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
             payloadEviction.compact()
             break
           }
