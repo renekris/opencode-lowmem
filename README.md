@@ -176,6 +176,11 @@ Then run `opencode` as usual:
 2. Every **new** session runs the lowmem build.
 3. Auth, config, sessions, and plugins carry over unchanged — same
    `opencode.db`, same settings, nothing to migrate.
+4. Set `"autoupdate": false` in your opencode config. With autoupdate on, the
+   next upstream patch release would download stock opencode over the fork
+   binary (the updater compares against upstream releases and a
+   `<upstream>-lowmem.<round>` version never matches). Update the fork by
+   re-running the install script instead.
 
 Going back to stock opencode later is just reinstalling the upstream binary the
 way you originally installed it; the shared database needs no changes.
