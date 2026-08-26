@@ -62,7 +62,8 @@ rewrite them) — find fork work with:
 
 ```bash
 git log --grep '(port of upstream #42150)'        # a specific port
-git log --oneline v1.18.23..HEAD -- <file-path>   # everything touching a seam
+git log --oneline <base-tag>..HEAD -- <file-path> # everything touching a seam
+# <base-tag> = the latest merged upstream release tag (the vX.Y.Z behind HEAD)
 ```
 
 ## Ported upstream fixes (never merged upstream)
@@ -321,15 +322,15 @@ is fork-owned files):
 **Watch-list** (adopt upstream if merged, replacing our port): #39970
 (comprehensive stream-incomplete handling, supersedes #43881/#43607), #41466
 (same empty-stream bug via new error type), #40142 (finish=length loop exit),
-#43302 (v2 sync engine — design-borrow only). New candidates from the
-2026-08-26 v1.18.23 update sweep: #39930 (bound compacted history hydration),
+#43302 (v2 sync engine — design-borrow only). Candidates adopted from the
+latest update sweep: #39930 (bound compacted history hydration),
 #38939 (PubSub `allBounded` listener leak), #41950 (config global-cache clone),
 #33713 (evict idle per-directory serve instances), #44631 (Bedrock 16 MiB
 event-stream frame reject).
 
-**Deferred ports**: #43769 (parallel-session snapshot scan CPU −77%; PR
+**Deferred ports**: #43769 (parallel-session snapshot scan CPU −77%; blocked —
 authored against the post-split `packages/ai`/`packages/util` tree that does
-not exist at v1.18.23 — re-verified 2026-08-26) and #40698 (TUI
+not exist in our base yet) and #40698 (TUI
 syntax-highlight LRU cache; wraps `getTreeSitterClient().highlightOnce`).
 Correction 2026-08-25: `highlightOnce` IS present in our pinned
 `@opentui/core` (`lib/tree-sitter/client.d.ts`) — the earlier absence claim
@@ -356,6 +357,7 @@ this fork just ships it.
 ## About upstream
 
 This fork builds on [opencode](https://github.com/anomalyco/opencode) — the open
-source AI coding agent, pinned at `v1.18.23`. See the
+source AI coding agent, pinned to the latest merged upstream release tag (see
+this repo's tags and releases for the current base). See the
 [upstream README](https://github.com/anomalyco/opencode/tree/dev#readme) for
 everything not fork-specific.

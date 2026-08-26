@@ -19,7 +19,7 @@ not-ported list, credit — keep its tables updated on every port).
 ## Hard rules
 
 - Branches: `local-diff-caps` = pre-port customs baseline; `port/ram-fixes` = active
-  fork line. Never force-push either.
+  fork line. Never force-push either; never rewrite or delete published tags.
 - Never run `oc upgrade` before checking what it does to this tree — it rebuilds/resets
   the dist this fork occupies. The live binary is
   `packages/opencode/dist/opencode-linux-x64/bin/opencode`, path-exec'd by
@@ -29,53 +29,62 @@ not-ported list, credit — keep its tables updated on every port).
 - The db (`opencode.db`) is shared by old and new binaries. Only zero-migration changes
   may ship without a sandbox data-copy proof. Anything schema-touching needs its own
   gated round (sandbox data-copy proof required).
+- **Never use the live data root for proofs.** The live `opencode.db` is tens of GiB
+  and shared with running sessions. Never copy it, `sqlite3 .backup` it, or point any
+  binary at it. Upkeep proofs run against synthetic XDG sandboxes (step 8). Only the
+  gated summary-diff proof script may read the live root, and only for
+  schema-touching rounds — if the db has outgrown that script's implicit size
+  budget, stop and agree a strategy with Ren before running it.
 
 ## Agentic upkeep procedure (per upstream release)
 
-1. `git fetch upstream --tags`; note new tag `vX.Y.Z`.
-2. Evaluate: `git log --oneline HEAD..vX.Y.Z` + diff file list vs fork-touched files
-   (`git diff --name-only vX..vX+1` ∩ fork patches). Zero overlap ⇒ clean rebase expected.
-3. Rebase: `git checkout -b port/ram-fixes-<date> port/ram-fixes && git rebase vX.Y.Z`
-   (or rebase `port/ram-fixes` itself; never rewrite pushed history without Ren).
-4. Check schema safety: if the release adds db migrations (search diff for
-   `data_migration`/drizzle/schema files), STOP and gate like #42771 — sandbox
-   data-copy proof required before shipping.
-5. Sweep upstream for new unmerged memory/perf PRs:
+1. `git fetch upstream --tags`; note the new tag.
+2. Overlap check: `git diff --name-only <old-base>..<new-tag>` ∩ fork seam files
+   (the README seam inventory). Zero overlap ⇒ clean merge expected.
+3. **Merge** the tag into `port/ram-fixes` (`git merge vX.Y.Z`) — published history
+   is never rebased. Version-bump conflicts in `package.json`/`bun.lock` are trivial:
+   take theirs, then restore the fork's two carried lines — the
+   `packages/sdk/js/package.json` typecheck script
+   (`tsgo --noEmit && tsgo --noEmit -p test/tsconfig.json`) plus its
+   `"@types/bun": "catalog:"` devDep, and the matching `"@types/bun": "catalog:"`
+   line in `bun.lock`.
+4. Schema gate: if the tag's diff adds db migrations (`data_migration`/drizzle/schema
+   files), STOP — gated round with a sandbox data-copy proof before shipping.
+5. Sweep upstream for unmerged memory/perf PRs:
    `gh api "search/issues?q=repo:anomalyco/opencode+is:pr+is:open+memory+OR+leak+OR+RSS"`.
-   Filter: fixes only, not features; check `merged_at == null`; read thread for
-   maintainer signals. Evaluate each against the charter + the README's not-ported table.
-6. Port candidates: `gh pr diff <N> --repo anomalyco/opencode > /tmp/pr<N>.diff`,
-   then `git apply --check /tmp/pr<N>.diff` (must be CLEAN or trivially 3-way).
-   Commit as `type(scope): summary (port of upstream #N)`; add a row to the README's ported-fixes table
-   with author credit. Never drop the credit trailer.
-7. Test the affected suites (minimum): `message-v2` pagination, `processor-effect`,
-   `config`, plus the customs' suites — `diff-limits`, `summary-memory`, `arity`
-   (in `packages/opencode` and `packages/core` as appropriate; `bun test <file>`).
-8. Build: `./scripts/fork-build.sh` (stamps `<base>-lowmem.<round>` from git tags,
-   smoke-tests, tags the build, checks the shim). The channel it bakes in
-   (`OPENCODE_CHANNEL=latest`) is MANDATORY — wrong channel silently opens
-   `opencode-<channel>.db` instead of the real db.
-9. Sandbox proof before declaring done: `XDG_DATA_HOME=<copy-dir> <dist binary> session list`
-   must render sessions with exit 0.
-10. Update README (fix-table statuses, new base tag) and this file only if the procedure changed.
+   Port fixes-only candidates as `type(scope): summary (port of upstream #N)` and add
+   a README table row crediting the author. Never drop the credit trailer.
+6. Test the seams: run the guard suites named in the README seam inventory
+   (`bun test <file>` from `packages/opencode` / `packages/core`) plus the touched
+   customs' suites, and `bun run typecheck` in `packages/sdk/js`.
+7. Update the README tables/watch-list, then build with `./scripts/fork-build.sh`
+   (stamps `<base>-lowmem.<round>` from tags, smoke-tests, tags the build). The
+   baked-in channel (`OPENCODE_CHANNEL=latest`) is MANDATORY — a wrong channel
+   silently opens `opencode-<channel>.db`. If the shim was installed out-of-band
+   (ELF binary carrying an older version), rerun with
+   `OPENCODE_FORK_BUILD_ALLOW_SHIM_MISMATCH=1` — never "fix" the shim by hand.
+8. Zero-migration proof — synthetic sandbox only, never the live db:
+   `mkdir -p /tmp/synth/proj && cd /tmp/synth/proj`, then run the previous round's
+   binary (`XDG_DATA_HOME=/tmp/synth/data ~/.opencode/bin/opencode session list`,
+   exit 0 — creates a KB-scale db), then the new build
+   (`XDG_DATA_HOME=/tmp/synth/data packages/opencode/dist/opencode-linux-x64/bin/opencode session list`,
+   exit 0) and check `--version` reports the new stamp. Wipe `/tmp/synth` between rounds.
+9. Update this file only if the procedure changed.
 
-Summary-diff maintenance: the rebase seams are the new-summary write in
-`packages/opencode/src/session/summary.ts` and the legacy-clone trim in
-`packages/opencode/src/session/session.ts` (`Session.fork()`), both calling the
-fork-owned `packages/opencode/src/session/summary-diff-trim.ts` helper (see the
-README seam inventory for the full list). The helper is
-write-only: new durable summaries keep metadata, retained snapshots recompute
-patches on demand, and pruned snapshots use metadata fallback; historical
+Summary-diff maintenance (schema-touching rounds): the durable seams are the
+new-summary write in `packages/opencode/src/session/summary.ts` and the
+legacy-clone trim in `Session.fork()` (`packages/opencode/src/session/session.ts`),
+both calling the fork-owned `packages/opencode/src/session/summary-diff-trim.ts`.
+The helper is write-only: new durable summaries keep metadata, retained snapshots
+recompute patches on demand, pruned snapshots use metadata fallback; historical
 events are untouched and no migration is needed. Re-run
-`scripts/ram-bounds/summary-diff-proof.ts` after rebasing this seam, after
-changing snapshot/session persistence, and before promoting a build. The proof
-requires `SOURCE_XDG_DATA_HOME`, uses a generated isolated sandbox by default,
-and must never point the binary at the live data root.
+`scripts/ram-bounds/summary-diff-proof.ts` after touching those seams, after
+changing snapshot/session persistence, and before promoting a build. It generates
+its own isolated sandbox and must never receive the live data root.
 
-Rollback:
-1. Revert the functional commits of the affected round(s) on the active line.
-2. Rebuild: `./scripts/fork-build.sh`.
-3. Verify the shim reports the new version: `~/.opencode/bin/opencode --version` (or the dist binary path printed by the script).
+Rollback: revert the functional commits of the affected round(s) on the active line,
+rebuild with `./scripts/fork-build.sh`, and verify the shim reports the new version
+(`~/.opencode/bin/opencode --version`).
 
 <!-- FORK END -->
 
