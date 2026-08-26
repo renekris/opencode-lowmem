@@ -275,7 +275,6 @@ export const {
             }),
           )
           trackPermissionRequests(event.properties.sessionID)
-          payloadEviction.compact()
           break
         }
 
@@ -405,15 +404,14 @@ export const {
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore("session", result.index, reconcile(event.properties.info))
-          } else {
-            setStore(
-              "session",
-              produce((draft) => {
-                draft.splice(result.index, 0, event.properties.info)
-              }),
-            )
+            break
           }
-          payloadEviction.compact()
+          setStore(
+            "session",
+            produce((draft) => {
+              draft.splice(result.index, 0, event.properties.info)
+            }),
+          )
           break
         }
 
@@ -763,7 +761,6 @@ export const {
         async refresh() {
           const list = await listSessions()
           setStore("session", reconcile(list))
-          payloadEviction.compact()
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -779,7 +776,7 @@ export const {
           // Fork(lowmem): deleted sessions stay deleted; viewed() would re-arm
           // the recency clock for a session whose payloads must not return.
           if (payloadEviction.isDeleted(sessionID)) return
-          if (!payloadEviction.viewed(sessionID)) return
+          payloadEviction.viewed(sessionID)
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
