@@ -1,19 +1,52 @@
 # opencode-lowmem
 
-> **The same agent, bounded memory.** Built after a real workday ended with
-> 50+ finished subagent tabs that nothing ever freed and a process past
-> **12 GB RSS** — the same workload now runs at a fraction of that. Nothing is
-> removed or gated: every change bounds a resource or fixes a reliability defect.
+**OpenCode for long, agent-heavy workdays.** If you keep many sessions open,
+delegate to dozens of subagents, or leave the TUI running all day, this fork is
+designed to stop old work from quietly consuming more and more memory and CPU.
 
-The database format is untouched — sessions, auth, and config work
-interchangeably with stock opencode. Plugins work unchanged too: this fork is
-built and dogfooded daily with the
+It is still OpenCode: the same commands, sessions, auth, config, tools, and
+plugins. The fork adds limits and cleanup around the places that grow during
+heavy use. There is no database migration, and you can switch back to stock
+OpenCode at any time.
+
+### Try it
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renekris/opencode-lowmem/lowmem/scripts/fork-install.sh | bash
+```
+
+Start a new `opencode` session afterward. Existing sessions keep running their
+current binary; new sessions use the lowmem build.
+
+### What should feel different
+
+| Heavy-workload problem | What this fork does |
+| ---------------------- | ------------------- |
+| Finished agents and old sessions stay resident | Evicts inactive payloads and old finished-agent tabs, then reloads them when needed |
+| Long streamed answers get progressively more expensive | Coalesces text updates and removes quadratic delta concatenation |
+| Compacted sessions reload too much history | Hydrates a recent window instead of materializing the whole session |
+| Large edits and summaries carry huge patches | Caps snapshot patches and stores new summary diffs as metadata, recomputing content on demand |
+| LSP files and diagnostics accumulate | Bounds document text, oversized-document records, and pull diagnostics by count and bytes |
+| Event replay and background-job output spike memory | Pages durable events and keeps a bounded terminal-job ring |
+| Idle state updates wake every client repeatedly | Deduplicates unchanged idle status broadcasts |
+
+The goal is **bounded growth**, not a magic benchmark number. A fresh short
+session may look similar to stock OpenCode; the difference becomes clearer as
+sessions, agents, tool output, and edited files accumulate. Exact savings depend
+on the workload, model output, plugins, and which UI you use.
+
+The terminal TUI has the most complete set of bounds. Server-side fixes also
+benefit `opencode serve`, web, desktop, and IDE clients. One pathological active
+session can still exceed the documented allowances through fields that are not
+yet capped; the exact remaining gaps are stated below rather than hidden.
+
+The fork is built and dogfooded with the
 [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) plugin toolkit.
 
 ## Why this fork exists
 
 One heavy delegation day: 50+ finished subagent tabs sitting in the UI forever,
-a process that had crept past 12 GB on a 28 GB machine, and a swap partition
+a process that had crept past 12 GB inside a 28 GB WSL budget, and swap
 doing overtime. The stale tabs were the visible symptom — underneath, every
 compaction re-materialized full session histories, text deltas accumulated
 quadratically (server- and UI-side), multi-megabyte diff patches rode every
@@ -117,7 +150,7 @@ dominated real-world growth.
 | #16695 (memory-leak consolidation)      | closed unmerged by stalebot; useful pieces (LSP LRU) belong in fork customs instead |
 | #33713 (idle instance eviction)         | dormant upstream, wrong shape for multi-process usage                               |
 
-## Install
+## Install details and rollback
 
 > **Made for the terminal.** This fork targets `opencode` in the terminal (the
 > TUI) — the daily driver it was built from, and where every memory bound is
