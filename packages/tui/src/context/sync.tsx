@@ -419,10 +419,10 @@ export const {
         case "message.updated": {
           partDeltaBuffer.dropMessage(event.properties.info.id)
           // Fork(lowmem): rank inbound messages before the eviction gate so
-          // evicted children still reorder by receipt. Known root sessions
-          // are skipped so their traffic cannot evict child ranks from the
-          // bounded map; unknown sessions rank provisionally until their
-          // session row proves otherwise.
+          // evicted children still get their first-receipt (delegation) rank.
+          // Known root sessions are skipped so their traffic cannot evict
+          // child ranks from the bounded map; unknown sessions rank
+          // provisionally until their session row proves otherwise.
           const rankedRow = search(store.session, event.properties.info.sessionID, (s) => s.id)
           if (!rankedRow.found || store.session[rankedRow.index]?.parentID !== undefined) {
             noteInboundMessage(event.properties.info)

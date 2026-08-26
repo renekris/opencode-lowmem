@@ -1,28 +1,26 @@
 export type ChildInboundRank = { at: number; ordinal: number }
 
-// Fork(lowmem): conveyor ranks update only when a child RECEIVES a user message,
-// so tool rounds, permission asks, compaction, and metadata never reorder the list.
-// Known deviations (accepted): plan-tool self-injections and compaction auto-continue
-// replays also write user messages and will move the child.
+// Fork(lowmem): a child joins the conveyor at its FIRST inbound user message
+// (the delegation that created it) and is never re-ranked afterwards —
+// task_id continuations, compaction auto-continue replays, and plan-tool
+// self-injections all write user-role messages but never move a ranked child.
+// The map ranks at most the first CAP distinct children and never evicts:
+// once full, later children keep ordering by creation time (equivalent for
+// fresh delegations), and only an explicit deletion frees a slot. Human input
+// targets the viewed child, which the window pins, so it stays stable too.
 const CAP = 256
-const ranks = new Map<string, { at: number; ordinal: number; messageID: string }>()
+const ranks = new Map<string, { at: number; ordinal: number }>()
 let nextOrdinal = 0
 
 export function noteInboundMessage(info: {
-  id: string
   sessionID: string
   role: string
   time: { created: number }
 }): void {
   if (info.role !== "user") return
-  const current = ranks.get(info.sessionID)
-  if (current && current.messageID === info.id) return
-  ranks.delete(info.sessionID)
-  ranks.set(info.sessionID, { at: info.time.created, ordinal: nextOrdinal++, messageID: info.id })
-  if (ranks.size > CAP) {
-    const oldest = ranks.keys().next().value
-    if (oldest !== undefined) ranks.delete(oldest)
-  }
+  if (ranks.has(info.sessionID)) return
+  if (ranks.size >= CAP) return
+  ranks.set(info.sessionID, { at: info.time.created, ordinal: nextOrdinal++ })
 }
 
 export function inboundChildRank(sessionID: string): ChildInboundRank | undefined {

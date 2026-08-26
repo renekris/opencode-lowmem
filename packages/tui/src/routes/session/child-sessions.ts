@@ -8,8 +8,9 @@ type ChildSessionLike = {
 
 export type ChildRankLookup = (sessionID: string) => ChildInboundRank | undefined
 
-// Fork(lowmem): conveyor order = inbound-message rank first (a child moves only
-// when it receives a user message), creation time as fallback for unranked rows.
+// Fork(lowmem): conveyor order = inbound-message rank first (a child is ranked
+// once, at its first inbound user message), creation time as fallback for
+// unranked rows.
 // The id tie-break is DESCENDING because SessionID.descending() encodes later
 // creation as a lexically smaller id within the same millisecond.
 export function compareChildSessions(a: ChildSessionLike, b: ChildSessionLike, rank?: ChildRankLookup): number {
