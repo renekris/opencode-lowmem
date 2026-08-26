@@ -188,7 +188,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     if (sessionID !== undefined) warnPressure(sessionID)
   }
 
-  function warnPressure(sessionID: string, force = false, forcedReason = "permission-truncation") {
+  function warnPressure(sessionID: string, force = false) {
     const activeBytes = options.isActive?.(sessionID) === true ? (resident.get(sessionID) ?? 0) : 0
     const pressure =
       (budgetBytes > 0 && (evictableResident > budgetBytes || protectedResident > budgetBytes)) ||
@@ -203,7 +203,7 @@ export function createPayloadBudget(options: PayloadBudgetOptions = {}) {
     warn({
       component: "tui.payload",
       budget: "OPENCODE_TUI_PAYLOAD_BUDGET_MB",
-      reason: pressure ? "pressure" : forcedReason,
+      reason: pressure ? "pressure" : "permission-truncation",
       evictableResident,
       protectedResident,
       count: sessions.size,

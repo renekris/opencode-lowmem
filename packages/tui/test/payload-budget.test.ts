@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Part } from "@opencode-ai/sdk/v2"
 import vectors from "../../core/test/env-limit-vectors.json" with { type: "json" }
-import {
-  createPayloadBudget,
-  parseEnvLimit,
-  serializedUtf8Bytes,
-} from "../src/context/payload-budget"
+import { createPayloadBudget, parseEnvLimit, serializedUtf8Bytes } from "../src/context/payload-budget"
 import { createPartDeltaBuffer } from "../src/context/part-delta-buffer"
 
 describe("payload budget", () => {
@@ -34,8 +30,10 @@ describe("payload budget", () => {
     expect(budget.stats()).toMatchObject({
       evictableResident: 0,
       protectedResident:
-        serializedUtf8Bytes(message) + serializedUtf8Bytes(part) +
-        serializedUtf8Bytes([{ content: "todo" }]) + serializedUtf8Bytes([{ file: "a.ts", patch: "é" }]),
+        serializedUtf8Bytes(message) +
+        serializedUtf8Bytes(part) +
+        serializedUtf8Bytes([{ content: "todo" }]) +
+        serializedUtf8Bytes([{ file: "a.ts", patch: "é" }]),
       protectedSessionCount: 1,
     })
 
@@ -46,18 +44,6 @@ describe("payload budget", () => {
         serializedUtf8Bytes([{ content: "todo" }]) +
         serializedUtf8Bytes([{ file: "a.ts", patch: "é" }]),
     )
-  })
-
-  test("labels a forced root emergency warning separately from permission truncation", () => {
-    const warnings: Record<string, unknown>[] = []
-    const budget = createPayloadBudget({
-      now: () => 100_000,
-      warn: (fields) => warnings.push(fields),
-    })
-
-    budget.warnPressure("ses_root", true, "root-emergency-eviction")
-
-    expect(warnings.at(0)?.reason).toBe("root-emergency-eviction")
   })
 
   test("truncates only declared scalar leaves and retains permission inputs", () => {
@@ -132,7 +118,13 @@ describe("payload budget", () => {
 
   test("clears part and pending bytes atomically when a message bucket is removed", () => {
     const budget = createPayloadBudget()
-    const part = { id: "prt_atomic", sessionID: "ses_atomic", messageID: "msg_atomic", type: "text", text: "pending" } satisfies Part
+    const part = {
+      id: "prt_atomic",
+      sessionID: "ses_atomic",
+      messageID: "msg_atomic",
+      type: "text",
+      text: "pending",
+    } satisfies Part
 
     budget.replacePart(part.messageID, part.id, part.sessionID, part)
     budget.replacePendingDelta(part.messageID, 64)
@@ -210,7 +202,9 @@ describe("payload budget", () => {
 
     expect(budget.permissionInput("msg_permission", "call_0")).toEqual(input)
     expect(budget.permissionInput("msg_permission", "call_3")).toEqual(input)
-    expect(budget.permissionInput("msg_permission", "call_total")?.filePath).toContain("payload omitted by lowmem budget")
+    expect(budget.permissionInput("msg_permission", "call_total")?.filePath).toContain(
+      "payload omitted by lowmem budget",
+    )
     expect(budget.stats().permissionBytes).toBeLessThanOrEqual(2000)
   })
 
@@ -437,5 +431,4 @@ describe("payload budget", () => {
     expect(budget.permissionInput("msg_1", "call_1")).toEqual({ filePath: "a" })
     expect(budget.permissionInput("msg_2", "call_2")).toBeUndefined()
   })
-
 })
