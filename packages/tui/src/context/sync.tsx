@@ -376,6 +376,7 @@ export const {
               }),
             )
           }
+          payloadEviction.compact()
           break
         }
         case "session.updated": {
@@ -383,14 +384,15 @@ export const {
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore("session", result.index, reconcile(event.properties.info))
-            break
+          } else {
+            setStore(
+              "session",
+              produce((draft) => {
+                draft.splice(result.index, 0, event.properties.info)
+              }),
+            )
           }
-          setStore(
-            "session",
-            produce((draft) => {
-              draft.splice(result.index, 0, event.properties.info)
-            }),
-          )
+          payloadEviction.compact()
           break
         }
 
@@ -732,6 +734,7 @@ export const {
         async refresh() {
           const list = await listSessions()
           setStore("session", reconcile(list))
+          payloadEviction.compact()
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -747,7 +750,7 @@ export const {
           // Fork(lowmem): deleted sessions stay deleted; viewed() would re-arm
           // the recency clock for a session whose payloads must not return.
           if (payloadEviction.isDeleted(sessionID)) return
-          payloadEviction.viewed(sessionID)
+          if (!payloadEviction.viewed(sessionID)) return
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing

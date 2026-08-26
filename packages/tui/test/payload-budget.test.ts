@@ -48,6 +48,18 @@ describe("payload budget", () => {
     )
   })
 
+  test("labels a forced root emergency warning separately from permission truncation", () => {
+    const warnings: Record<string, unknown>[] = []
+    const budget = createPayloadBudget({
+      now: () => 100_000,
+      warn: (fields) => warnings.push(fields),
+    })
+
+    budget.warnPressure("ses_root", true, "root-emergency-eviction")
+
+    expect(warnings.at(0)?.reason).toBe("root-emergency-eviction")
+  })
+
   test("truncates only declared scalar leaves and retains permission inputs", () => {
     const budget = createPayloadBudget({ partIngressBytes: 4 })
     const text = {
@@ -129,6 +141,18 @@ describe("payload budget", () => {
     budget.removeParts(part.messageID)
     expect(budget.stats().evictableResident).toBe(0)
     expect(budget.messageIDs(part.sessionID)).toEqual([])
+  })
+
+  test("reports one session's exact resident payload bytes", () => {
+    const budget = createPayloadBudget()
+    const message = { id: "msg_session_bytes", role: "assistant", text: "payload" }
+    const todo = [{ content: "todo" }]
+
+    budget.replaceMessage("ses_session_bytes", message.id, message)
+    budget.replaceTodo("ses_session_bytes", todo)
+
+    expect(budget.sessionBytes("ses_session_bytes")).toBe(serializedUtf8Bytes(message) + serializedUtf8Bytes(todo))
+    expect(budget.sessionBytes("ses_other")).toBe(0)
   })
 
   test("aggregates pending delta bytes for every part of one message", () => {

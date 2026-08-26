@@ -1,0 +1,80 @@
+import type { GlobalEvent } from "@opencode-ai/sdk/v2"
+import { json } from "./sync-fixture"
+
+type Emit = (event: GlobalEvent) => void
+
+export function global(payload: GlobalEvent["payload"]): GlobalEvent {
+  return { directory: "/tmp/other", project: "proj_test", payload }
+}
+
+export function row(id: string, parentID?: string) {
+  return {
+    id,
+    parentID,
+    title: id,
+    slug: id,
+    projectID: "proj_test",
+    time: { created: 0, updated: 0 },
+    version: "1.15.13",
+    directory: "/tmp/opencode/packages/opencode",
+  }
+}
+
+export function message(sessionID: string, index: number, payloadBytes = 0) {
+  return {
+    id: `msg_${sessionID}_${index}`,
+    sessionID,
+    role: "assistant" as const,
+    agent: "build",
+    modelID: "model",
+    providerID: "test",
+    mode: "build",
+    parentID: `msg_${sessionID}_user_${index}`,
+    path: { cwd: "/tmp/opencode/packages/opencode", root: "/tmp/opencode/packages/opencode" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    structured: { payload: "x".repeat(payloadBytes) },
+    time: { created: index, completed: index + 1 },
+  }
+}
+
+export function fetchFor(rows: Map<string, ReturnType<typeof row>>, calls: Map<string, number>) {
+  return (url: URL): Response | undefined => {
+    const session = url.pathname.match(/^\/session\/([^/]+)$/)
+    const messages = url.pathname.match(/^\/session\/([^/]+)\/message$/)
+    const todo = url.pathname.match(/^\/session\/([^/]+)\/todo$/)
+    const diff = url.pathname.match(/^\/session\/([^/]+)\/diff$/)
+    const sessionID = session?.[1] ?? messages?.[1] ?? todo?.[1] ?? diff?.[1]
+    if (sessionID === undefined) return undefined
+    calls.set(sessionID, (calls.get(sessionID) ?? 0) + 1)
+    if (session) return json(rows.get(sessionID) ?? row(sessionID))
+    if (messages) return json([{ info: message(sessionID, 0), parts: [] }])
+    return json([])
+  }
+}
+
+export function emitRow(emit: Emit, value: ReturnType<typeof row>) {
+  emit(global({ id: `evt_row_${value.id}`, type: "session.updated", properties: { sessionID: value.id, info: value } }))
+}
+
+export function emitMessage(emit: Emit, value: ReturnType<typeof message>) {
+  emit(global({ id: `evt_${value.id}`, type: "message.updated", properties: { sessionID: value.sessionID, info: value } }))
+}
+
+export async function withPayloadLimits(
+  limits: { readonly budget: string; readonly sessions: string },
+  run: () => Promise<void>,
+) {
+  const previousBudget = process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB
+  const previousSessions = process.env.OPENCODE_TUI_PAYLOAD_SESSION_LIMIT
+  process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB = limits.budget
+  process.env.OPENCODE_TUI_PAYLOAD_SESSION_LIMIT = limits.sessions
+  try {
+    await run()
+  } finally {
+    if (previousBudget === undefined) delete process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB
+    else process.env.OPENCODE_TUI_PAYLOAD_BUDGET_MB = previousBudget
+    if (previousSessions === undefined) delete process.env.OPENCODE_TUI_PAYLOAD_SESSION_LIMIT
+    else process.env.OPENCODE_TUI_PAYLOAD_SESSION_LIMIT = previousSessions
+  }
+}
