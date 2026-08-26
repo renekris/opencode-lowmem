@@ -27,8 +27,10 @@ export function createMirrorBudget(isActiveSession: () => string | undefined) {
       const index = lru.indexOf(sessionID)
       if (index !== -1) lru.splice(index, 1)
       lru.push(sessionID)
-      const retained = messages.filter((message) => messageMaxBytes === 0 || serializedUtf8Bytes(message) <= messageMaxBytes)
-      const bytes = retained.reduce((total, message) => total + serializedUtf8Bytes(message), 0)
+      const measured = messages.map((message) => ({ message, bytes: serializedUtf8Bytes(message) }))
+      const retained = measured.filter(({ bytes }) => messageMaxBytes === 0 || bytes <= messageMaxBytes)
+      const bytes = retained.reduce((total, { bytes }) => total + bytes, 0)
+      const retainedMessages = retained.map(({ message }) => message)
       sizes.set(sessionID, bytes)
       resident += bytes
       const evictedSessions: string[] = []
@@ -42,8 +44,7 @@ export function createMirrorBudget(isActiveSession: () => string | undefined) {
       }
       const protectedSessionIDs = lru.filter((id) => id === activeSessionID)
       const protectedResident = protectedSessionIDs.reduce((total, id) => total + (sizes.get(id) ?? 0), 0)
-      const pressure =
-        (sessionLimit > 0 && lru.length > sessionLimit) || (budgetBytes > 0 && resident > budgetBytes)
+      const pressure = (sessionLimit > 0 && lru.length > sessionLimit) || (budgetBytes > 0 && resident > budgetBytes)
       if (evictedSessions.length > 0 || pressure) {
         evictions += evictedSessions.length
         const now = Date.now()
@@ -63,7 +64,7 @@ export function createMirrorBudget(isActiveSession: () => string | undefined) {
           })
         }
       }
-      return { messages: sizes.has(sessionID) ? retained : [], evictedSessions }
+      return { messages: sizes.has(sessionID) ? retainedMessages : [], evictedSessions }
     },
   }
 }
