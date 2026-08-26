@@ -26,8 +26,6 @@ import { useRoute } from "./route"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import { createMirrorBudget } from "./mirror-budget"
 
-const MIRROR_RECONCILIATION_INTERVAL_MS = 120
-
 type LocationData = {
   agent?: AgentV2Info[]
   command?: CommandV2Info[]
@@ -94,40 +92,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
     })
 
     const mirrorBudget = createMirrorBudget(activeSessionGetter())
-    const dirtyMirrorSessionIDs = new Set<string>()
-    let mirrorReconciliationTimer: ReturnType<typeof setTimeout> | undefined
 
-    function reconcileMirrorSessionMessages(sessionID: string, messages: readonly SessionMessage[]) {
-      const replacement = mirrorBudget.replaceMirrorSessionMessages(sessionID, messages)
-      setStore(
-        "session",
-        "message",
-        produce((draft) => {
-          draft[sessionID] = replacement.messages
-          for (const evictedSessionID of replacement.evictedSessions) delete draft[evictedSessionID]
-        }),
-      )
-      for (const evictedSessionID of replacement.evictedSessions) dirtyMirrorSessionIDs.delete(evictedSessionID)
-    }
-
-    function flushMirrorReconciliation() {
-      if (mirrorReconciliationTimer !== undefined) clearTimeout(mirrorReconciliationTimer)
-      mirrorReconciliationTimer = undefined
-      const sessionIDs = [...dirtyMirrorSessionIDs]
-      dirtyMirrorSessionIDs.clear()
-      for (const sessionID of sessionIDs) {
-        reconcileMirrorSessionMessages(sessionID, store.session.message[sessionID] ?? [])
-      }
-    }
-
-    function scheduleMirrorReconciliation(sessionID: string) {
-      dirtyMirrorSessionIDs.delete(sessionID)
-      dirtyMirrorSessionIDs.add(sessionID)
-      if (mirrorReconciliationTimer !== undefined) return
-      mirrorReconciliationTimer = setTimeout(flushMirrorReconciliation, MIRROR_RECONCILIATION_INTERVAL_MS)
-    }
-
-    function updateMirrorSessionMessages(
+    function replaceMirrorSessionMessages(
       sessionID: string,
       input: readonly SessionMessage[] | ((messages: SessionMessage[]) => void),
     ) {
@@ -136,20 +102,19 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         "message",
         produce((draft) => {
           const messages = draft[sessionID] ?? []
-          if (typeof input === "function") {
-            input(messages)
-            draft[sessionID] = messages
-            return
-          }
-          draft[sessionID] = [...input]
+          if (typeof input === "function") input(messages)
+          else draft[sessionID] = [...input]
+          if (typeof input === "function") draft[sessionID] = messages
+          const replacement = mirrorBudget.replaceMirrorSessionMessages(sessionID, draft[sessionID] ?? [])
+          draft[sessionID] = replacement.messages
+          for (const evictedSessionID of replacement.evictedSessions) delete draft[evictedSessionID]
         }),
       )
-      scheduleMirrorReconciliation(sessionID)
     }
 
     const message = {
       update(sessionID: string, fn: (messages: SessionMessage[]) => void) {
-        updateMirrorSessionMessages(sessionID, fn)
+        replaceMirrorSessionMessages(sessionID, fn)
       },
       prepend(messages: SessionMessage[], item: SessionMessage) {
         if (messages.some((existing) => existing.id === item.id)) return
@@ -476,10 +441,6 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       })
       onCleanup(unsub)
     })
-    onCleanup(() => {
-      if (mirrorReconciliationTimer !== undefined) clearTimeout(mirrorReconciliationTimer)
-      dirtyMirrorSessionIDs.clear()
-    })
 
     const result = {
       session: {
@@ -496,9 +457,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           },
           async refresh(sessionID: string) {
             const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
-            dirtyMirrorSessionIDs.delete(sessionID)
-            flushMirrorReconciliation()
-            reconcileMirrorSessionMessages(sessionID, result.data.data)
+            replaceMirrorSessionMessages(sessionID, result.data.data)
           },
         },
         permission: {
