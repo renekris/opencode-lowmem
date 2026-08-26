@@ -22,11 +22,7 @@ type EvictionDeps = {
   readonly hydratingSessions: Map<string, unknown>
 }
 
-export function createPayloadEviction<T extends EvictableStore>(
-  store: T,
-  setStore: SetStoreFunction<T>,
-  deps: EvictionDeps,
-) {
+export function createPayloadEviction<T extends EvictableStore>(store: T, setStore: SetStoreFunction<T>, deps: EvictionDeps) {
   const evicted = new Set<string>()
   const deleted = new Set<string>()
   const deletionOrder: string[] = []

@@ -254,6 +254,7 @@ export const {
             }),
           )
           trackPermissionRequests(event.properties.sessionID)
+          payloadEviction.compact()
           break
         }
 
@@ -375,7 +376,6 @@ export const {
               }),
             )
           }
-          payloadEviction.compact()
           break
         }
         case "session.updated": {
