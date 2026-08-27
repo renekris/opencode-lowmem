@@ -140,6 +140,113 @@ it.live("chunkTimeout decodes multi-byte characters split across reads", () =>
   }),
 )
 
+it.live("an unterminated SSE event aborts once it exceeds the byte cap", () =>
+  Effect.gen(function* () {
+    const server = yield* Effect.acquireRelease(
+      Effect.promise(() => unterminatedSSEServer()),
+      (server) => Effect.sync(() => server.server.close()),
+    )
+
+    yield* provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* Provider.Service
+          const model = yield* provider.getModel(ProviderV2.ID.make("test"), ModelV2.ID.make("test-model"))
+          const result = streamText({
+            model: yield* provider.getLanguage(model),
+            onError() {},
+            messages: [{ role: "user", content: "hello" }],
+          })
+
+          const error = yield* Effect.promise(async () => {
+            try {
+              for await (const part of result.fullStream) {
+                if (part.type === "error") return part.error
+              }
+            } catch (error) {
+              return error
+            }
+            return undefined
+          })
+          expect(error).toBeInstanceOf(ProviderError.ResponseStreamError)
+          expect(String(error)).toContain("exceeded")
+        }),
+      { config: providerConfig(server.url, { chunkTimeout: 2_000 }) },
+    )
+  }),
+)
+
+it.live("a single terminated SSE event above the cap still aborts", () =>
+  Effect.gen(function* () {
+    const server = yield* Effect.acquireRelease(
+      Effect.promise(() => unterminatedSSEServer(true)),
+      (server) => Effect.sync(() => server.server.close()),
+    )
+
+    yield* provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* Provider.Service
+          const model = yield* provider.getModel(ProviderV2.ID.make("test"), ModelV2.ID.make("test-model"))
+          const result = streamText({
+            model: yield* provider.getLanguage(model),
+            onError() {},
+            messages: [{ role: "user", content: "hello" }],
+          })
+
+          const error = yield* Effect.promise(async () => {
+            try {
+              for await (const part of result.fullStream) {
+                if (part.type === "error") return part.error
+              }
+            } catch (error) {
+              return error
+            }
+            return undefined
+          })
+          expect(error).toBeInstanceOf(ProviderError.ResponseStreamError)
+          expect(String(error)).toContain("exceeded")
+        }),
+      { config: providerConfig(server.url, { chunkTimeout: 2_000 }) },
+    )
+  }),
+)
+
+it.live("a coalesced stream of small comment frames never trips the frame cap", () =>
+  Effect.gen(function* () {
+    const server = yield* Effect.acquireRelease(
+      Effect.promise(() => commentStormServer()),
+      (server) => Effect.sync(() => server.server.close()),
+    )
+
+    yield* provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* Provider.Service
+          const model = yield* provider.getModel(ProviderV2.ID.make("test"), ModelV2.ID.make("test-model"))
+          const result = streamText({
+            model: yield* provider.getLanguage(model),
+            onError() {},
+            messages: [{ role: "user", content: "hello" }],
+          })
+
+          const error = yield* Effect.promise(async () => {
+            try {
+              for await (const part of result.fullStream) {
+                if (part.type === "error") return part.error
+              }
+            } catch (error) {
+              return error
+            }
+            return undefined
+          })
+          expect(error).toBeUndefined()
+        }),
+      { config: providerConfig(server.url, { chunkTimeout: 5_000 }) },
+    )
+  }),
+)
+
 it.live("headerTimeout aborts when response headers do not arrive", () =>
   Effect.gen(function* () {
     const server = yield* Effect.acquireRelease(
@@ -257,8 +364,20 @@ async function delayedHeaderServer(delay: number): Promise<{ server: Server; url
   return { server, url: `http://127.0.0.1:${address.port}` }
 }
 
-async function delayedBodyServer(delay: number): Promise<{ server: Server; url: string }> {
+async function commentStormServer(): Promise<{ server: Server; url: string }> {
   const server = createServer((_, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" })
+    res.flushHeaders()
+    res.write(": k\n\n".repeat(1_800_000))
+    res.end('data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n\n')
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port")
+  return { server, url: `http://127.0.0.1:${address.port}` }
+}
+
+async function delayedBodyServer(delay: number): Promise<{ server: Server; url: string }> {  const server = createServer((_, res) => {
     res.writeHead(200, { "content-type": "text/event-stream" })
     res.flushHeaders()
     setTimeout(() => {
@@ -292,6 +411,18 @@ async function utf8SplitBodyServer(): Promise<{ server: Server; url: string }> {
     const split = bytes.indexOf("ä") + 1
     res.write(bytes.subarray(0, split))
     setTimeout(() => res.end(bytes.subarray(split)), 30)
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port")
+  return { server, url: `http://127.0.0.1:${address.port}` }
+}
+
+async function unterminatedSSEServer(terminated = false): Promise<{ server: Server; url: string }> {
+  const server = createServer((_, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" })
+    res.flushHeaders()
+    res.write(`data: ${"x".repeat(9 * 1024 * 1024)}${terminated ? "\n\n" : ""}`)
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()

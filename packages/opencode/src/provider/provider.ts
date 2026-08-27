@@ -34,6 +34,13 @@ import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
+// An SSE frame has no natural size bound: the chunk deadline only limits
+// how long a frame may keep growing, not how large it may get. The cap is
+// per frame, in decoded characters (UTF-16 units), enforced against each
+// completed frame and the unterminated tail separately so coalesced small
+// keepalive frames can never trip it.
+const SSE_EVENT_MAX_CHARS = 8 * 1024 * 1024
+
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
   if (!res.body) return res
@@ -43,13 +50,6 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   const decoder = new TextDecoder()
   let buffer = ""
   let deadline: number | undefined
-
-  function observedDataEvent(value: Uint8Array) {
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split(/\r?\n\r?\n/)
-    buffer = events.pop() ?? ""
-    return events.some((event) => /^data\s*:/m.test(event))
-  }
 
   const body = new ReadableStream<Uint8Array>({
     async pull(ctrl) {
@@ -81,7 +81,20 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
         return
       }
 
-      if (observedDataEvent(part.value)) deadline = Date.now() + ms
+      const events = (buffer + decoder.decode(part.value, { stream: true })).split(/\r?\n\r?\n/)
+      buffer = events.pop() ?? ""
+      const sawData = events.some((event) => /^data\s*:/m.test(event))
+      const oversizeFrame =
+        events.some((event) => event.length > SSE_EVENT_MAX_CHARS) || buffer.length > SSE_EVENT_MAX_CHARS
+      if (oversizeFrame) {
+        const err = new ProviderError.ResponseStreamError(
+          `SSE event exceeded ${SSE_EVENT_MAX_CHARS} characters without termination`,
+        )
+        ctl.abort(err)
+        void reader.cancel(err)
+        throw err
+      }
+      if (sawData) deadline = Date.now() + ms
       ctrl.enqueue(part.value)
     },
     async cancel(reason) {
