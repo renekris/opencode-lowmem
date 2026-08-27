@@ -161,6 +161,14 @@ describe("viewed-child pin", () => {
     expect(inboundChildRank("c1")?.at).toBe(1)
   })
 
+  test("switching away from a pinned child commits exactly its own deferred rank", () => {
+    setViewedChild("c1")
+    noteInboundMessage(userMsg("c1", 100))
+    setViewedChild("c2")
+    expect(inboundChildRank("c1")?.at).toBe(100)
+    expect(inboundChildRank("c2")).toBeUndefined()
+  })
+
   test("a pinned child deleted then unpinned restores no rank or deferred touch", () => {
     noteInboundMessage(userMsg("c48", 48))
     setViewedChild("c48")

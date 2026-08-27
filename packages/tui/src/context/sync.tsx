@@ -245,7 +245,14 @@ export const {
     // message for a still-unknown row self-heals through a single-flight
     // session GET instead of a full payload hydration.
     const sessionRowFetches = new Set<string>()
+    let sessionRowGeneration = 0
+    const sessionRowGenerations = new Map<string, number>()
+    function touchSessionRow(sessionID: string) {
+      sessionRowGeneration += 1
+      sessionRowGenerations.set(sessionID, sessionRowGeneration)
+    }
     function upsertSessionInfo(info: Session) {
+      touchSessionRow(info.id)
       if (info.parentID === undefined) forgetInboundChild(info.id)
       const result = search(store.session, info.id, (s) => s.id)
       if (result.found) {
@@ -263,6 +270,24 @@ export const {
       for (const info of sessions) {
         if (info.parentID === undefined) forgetInboundChild(info.id)
       }
+    }
+    // A list response is a point-in-time snapshot. Rows a live event
+    // upserted after the request began are strictly fresher than the
+    // snapshot, and rows deleted since are tombstoned — reconcile must
+    // not drop or resurrect them.
+    function applySessionList(sessions: readonly Session[], requestGeneration: number) {
+      const listed = sessions.filter((info) => !payloadEviction.isDeleted(info.id))
+      const listedIDs = new Set(listed.map((info) => info.id))
+      const liveRows = store.session.filter(
+        (info) => !listedIDs.has(info.id) && (sessionRowGenerations.get(info.id) ?? 0) > requestGeneration,
+      )
+      const droppedRows = store.session.filter(
+        (info) => !listedIDs.has(info.id) && (sessionRowGenerations.get(info.id) ?? 0) <= requestGeneration,
+      )
+      forgetRootInboundRanks(listed)
+      setStore("session", reconcile(listed))
+      for (const info of liveRows) upsertSessionInfo(info)
+      for (const info of droppedRows) sessionRowGenerations.delete(info.id)
     }
     function reconcileSessionRow(sessionID: string) {
       if (sessionRowFetches.has(sessionID)) return
@@ -282,6 +307,12 @@ export const {
             sessionID,
             error: e instanceof Error ? e.message : String(e),
           })
+          // A definitive 404 (status rides on error.cause via the SDK's
+          // error interceptor) proves the session does not exist, so the
+          // provisional conveyor rank must not linger. Transient failures
+          // keep the rank so a later message can retry.
+          const cause = isRecord(e) ? e.cause : undefined
+          if (isRecord(cause) && cause.status === 404) forgetInboundChild(sessionID)
         })
         .finally(() => {
           sessionRowFetches.delete(sessionID)
@@ -417,6 +448,7 @@ export const {
 
         case "session.deleted": {
           forgetInboundChild(event.properties.info.id)
+          sessionRowGenerations.delete(event.properties.info.id)
           // Fork(lowmem): full cleanup — payload and bookkeeping buckets die
           // with the session, and the ID is tombstoned so late events and
           // in-flight syncs cannot resurrect them (upstream #12351).
@@ -650,6 +682,7 @@ export const {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
       const projectPromise = project.sync()
+      const sessionListGeneration = sessionRowGeneration
       const sessionListPromise = projectPromise.then(() => listSessions())
 
       // blocking - include session.list when continuing a session
@@ -708,10 +741,7 @@ export const {
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
-              if (sessions !== undefined) {
-                forgetRootInboundRanks(sessions)
-                setStore("session", reconcile(sessions))
-              }
+              if (sessions !== undefined) applySessionList(sessions, sessionListGeneration)
             })
           })
         })
@@ -723,8 +753,7 @@ export const {
               ? []
               : [
                   sessionListPromise.then((sessions) => {
-                    forgetRootInboundRanks(sessions)
-                    setStore("session", reconcile(sessions))
+                    applySessionList(sessions, sessionListGeneration)
                   }),
                 ]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
@@ -795,9 +824,9 @@ export const {
           return sessionListQuery()
         },
         async refresh() {
+          const requestGeneration = sessionRowGeneration
           const list = await listSessions()
-          forgetRootInboundRanks(list)
-          setStore("session", reconcile(list))
+          applySessionList(list, requestGeneration)
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -819,6 +848,7 @@ export const {
           if (syncing) return syncing
           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
           hydratingSessions.set(sessionID, tracker)
+          const rowGenerationBeforeFetch = sessionRowGenerations.get(sessionID) ?? 0
           const task = (async () => {
             const [session, messages, todo, diff] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
@@ -830,15 +860,26 @@ export const {
             // writing would resurrect its payloads.
             if (payloadEviction.isDeleted(sessionID)) return
             const fetchedRow = session.data
-            if (fetchedRow !== undefined && fetchedRow.parentID === undefined) forgetInboundChild(sessionID)
+            // A live session event may have upserted a fresher row while the
+            // GET was in flight; only an untouched or still-missing row may
+            // be replaced by the fetched snapshot.
+            const rowMatch = search(store.session, sessionID, (s) => s.id)
+            const writeFetchedRow = !rowMatch.found || sessionRowGenerations.get(sessionID) === rowGenerationBeforeFetch
+            if (writeFetchedRow) {
+              touchSessionRow(sessionID)
+              if (fetchedRow !== undefined && fetchedRow.parentID === undefined) forgetInboundChild(sessionID)
+            }
             const messageIDs = payloadBudget.messageIDs(sessionID)
             batch(() => {
               for (const flushed of partDeltaBuffer.flushMessages(messageIDs)) tracker.parts.add(flushed.partID)
               setStore(
                 produce((draft) => {
                   const match = search(draft.session, sessionID, (s) => s.id)
-                  if (match.found) draft.session[match.index] = session.data!
-                  if (!match.found) draft.session.splice(match.index, 0, session.data!)
+                  if (match.found) {
+                    if (writeFetchedRow && fetchedRow !== undefined) draft.session[match.index] = fetchedRow
+                  } else if (fetchedRow !== undefined) {
+                    draft.session.splice(match.index, 0, fetchedRow)
+                  }
                   draft.todo[sessionID] = todo.data ?? []
                   const currentMessages = draft.message[sessionID] ?? []
                   const infos = (messages.data ?? []).flatMap((message) => {

@@ -19,17 +19,23 @@ import type { FetchHandler } from "../../../fixture/tui-sdk"
 const deferredFetch = (
   rows: Map<string, ReturnType<typeof row>>,
   calls: Map<string, number>,
-): { handler: FetchHandler; resolveSession: (sessionID: string, info: ReturnType<typeof row> | undefined) => void } => {
-  const pending = new Map<string, ((info: ReturnType<typeof row> | undefined) => void)[]>()
+): {
+  handler: FetchHandler
+  resolveSession: (sessionID: string, info: ReturnType<typeof row> | undefined | null) => void
+} => {
+  const pending = new Map<string, ((info: ReturnType<typeof row> | undefined | null) => void)[]>()
   return {
     handler: (url: URL) => {
       const session = url.pathname.match(/^\/session\/([^/]+)$/)
       if (!session || session[1] !== "ses_slow") return fetchFor(rows, calls)(url)
       const sessionID = session[1]
       calls.set(sessionID, (calls.get(sessionID) ?? 0) + 1)
-      return new Promise<Response>((resolve) => {
+      return new Promise<Response>((resolve, reject) => {
         const list = pending.get(sessionID) ?? []
-        list.push((info) => resolve(info ? json(info) : new Response("not found", { status: 404 })))
+        list.push((info) => {
+          if (info === null) reject(new TypeError("fetch failed"))
+          else resolve(info ? json(info) : new Response("not found", { status: 404 }))
+        })
         pending.set(sessionID, list)
       })
     },
@@ -205,8 +211,40 @@ test("a 404 reconciliation logs the failure and inserts nothing", async () => {
       await wait(() => errorLog.mock.calls.length > 0)
       expect(sync.data.session.find((session) => session.id === missing.id)).toBeUndefined()
       expect(errorLog.mock.calls[0]?.[0]).toBe("tui session row reconciliation failed")
+      expect(inboundChildRank(missing.id)).toBeUndefined()
     } finally {
       errorLog.mockRestore()
+      forgetInboundChild(missing.id)
+      app.renderer.destroy()
+    }
+  })
+})
+
+test("a transport-failed reconciliation keeps the provisional rank for a later retry", async () => {
+  await withSessionLimit("50", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const root = row("ses_root")
+    const child = row("ses_slow", root.id)
+    const rows = new Map([
+      [root.id, root],
+      [child.id, child],
+    ])
+    const calls = new Map<string, number>()
+    const { handler, resolveSession } = deferredFetch(rows, calls)
+    const { app, emit } = await mount(handler, tmp.path)
+    const errorLog = spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      emitRow(emit, root)
+      emitMessage(emit, userMessage(child.id, 100))
+      await wait(() => (calls.get(child.id) ?? 0) === 1)
+      resolveSession(child.id, null)
+      await wait(() => errorLog.mock.calls.length > 0)
+      expect(inboundChildRank(child.id)?.at).toBe(100)
+    } finally {
+      errorLog.mockRestore()
+      forgetInboundChild(child.id)
       app.renderer.destroy()
     }
   })
