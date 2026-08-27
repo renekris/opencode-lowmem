@@ -75,7 +75,35 @@ export function permissionPattern(tokens: string[], fullCommand: string) {
   return prefix(git).join(" ") + " *"
 }
 
-export function alwaysPattern(tokens: string[]) {
+// Privilege and wrapper prefixes executable() does not unwrap. A wildcard
+// Always pattern derived while one of these is the effective executable
+// collapses to the wrapper itself (`sudo git status` -> `sudo *`), which
+// would persist approval for every later sudo command. Matching is by
+// basename so path-qualified forms cannot bypass it; env/command appear
+// here only in path-qualified form, where the normal unwrapping failed.
+const PRIVILEGE_WRAPPERS = new Set([
+  "sudo",
+  "doas",
+  "nohup",
+  "nice",
+  "time",
+  "exec",
+  "timeout",
+  "stdbuf",
+  "setsid",
+  "strace",
+  "watch",
+  "env",
+  "command",
+])
+
+function privilegeWrapped(executableToken: string) {
+  return PRIVILEGE_WRAPPERS.has(executableToken.split("/").pop() ?? "")
+}
+
+export function alwaysPattern(tokens: string[]): string | undefined {
+  const effective = executable(tokens)
+  if (privilegeWrapped(effective[0] ?? "")) return undefined
   return prefix(gitCommand(tokens) ?? tokens).join(" ") + " *"
 }
 

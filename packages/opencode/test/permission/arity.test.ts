@@ -70,3 +70,23 @@ test("non-git permission patterns preserve the full command", () => {
   const command = "printf 'git clean'"
   expect(BashArity.permissionPattern(["printf", "git clean"], command)).toBe(command)
 })
+
+test("always patterns are suppressed for privilege wrapper prefixes", () => {
+  expect(BashArity.alwaysPattern(["sudo", "git", "status"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["sudo", "rm", "-rf", "/tmp/cache"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["doas", "git", "status"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["nohup", "npm", "run", "dev"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["nice", "-n", "10", "make"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["time", "git", "status"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["exec", "make", "all"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["timeout", "30", "git", "status"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["stdbuf", "-oL", "make"])).toBeUndefined()
+  // A wrapper hidden behind an unwrapped env prefix is still detected.
+  expect(BashArity.alwaysPattern(["env", "GIT_MASTER=1", "sudo", "git", "status"])).toBeUndefined()
+  // Path-qualified wrappers and unwrappers are matched by basename.
+  expect(BashArity.alwaysPattern(["/usr/bin/sudo", "git", "status"])).toBeUndefined()
+  expect(BashArity.alwaysPattern(["/usr/bin/env", "GIT_MASTER=1", "git", "status"])).toBeUndefined()
+  // Unwrapped commands keep their scoped always patterns.
+  expect(BashArity.alwaysPattern(["env", "GIT_MASTER=1", "git", "status"])).toBe("git status *")
+  expect(BashArity.alwaysPattern(["npm", "run", "dev", "watch"])).toBe("npm run dev *")
+})

@@ -241,6 +241,31 @@ describe("tool.shell permissions", () => {
     }),
   )
 
+  each("offers no always pattern for privilege-wrapped commands", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          expect(
+            yield* fail(
+              {
+                command: "sudo echo hello",
+              },
+              capture(requests, err),
+            ),
+          ).toMatchObject({ message: err.message })
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.patterns).toContain("sudo echo hello")
+          expect(bashReq!.always).not.toContain("sudo *")
+        }),
+      )
+    }),
+  )
+
   each("asks for bash permission with multiple commands", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
