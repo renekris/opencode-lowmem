@@ -62,8 +62,14 @@ else
 fi
 tar -xzf "${TMP_DIR}/asset.tar.gz" -C "${TMP_DIR}"
 mkdir -p "${INSTALL_DIR}"
-mv "${TMP_DIR}/${PLATFORM}/bin/opencode" "${INSTALL_DIR}/opencode"
-chmod +x "${INSTALL_DIR}/opencode"
+# Publish via a same-directory rename: a cross-filesystem mv from /tmp would
+# copy+unlink and leave a truncated live binary if interrupted. mktemp keeps
+# the staging name unpredictable so a pre-planted symlink cannot redirect cp.
+INSTALL_TMP="$(mktemp "${INSTALL_DIR}/opencode-install.XXXXXX")"
+trap 'rm -rf "${TMP_DIR}"; rm -f "${INSTALL_TMP}"' EXIT
+cp "${TMP_DIR}/${PLATFORM}/bin/opencode" "${INSTALL_TMP}"
+chmod +x "${INSTALL_TMP}"
+mv -f "${INSTALL_TMP}" "${INSTALL_DIR}/opencode"
 
 echo "Installed: $("${INSTALL_DIR}/opencode" --version)"
 echo "Make sure ${INSTALL_DIR} is on your PATH."
