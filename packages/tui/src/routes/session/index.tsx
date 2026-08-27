@@ -24,7 +24,7 @@ import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { compareChildSessions, cycleChildSessionID, newestChildSessionID } from "./child-sessions"
-import { inboundChildRank } from "./child-inbound"
+import { inboundChildRank, setViewedChild } from "./child-inbound"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
@@ -196,6 +196,12 @@ export function Session() {
   const { theme } = useTheme()
   const promptRef = usePromptRef()
   const session = createMemo(() => sync.session.get(route.sessionID))
+  // Fork(lowmem): pin the viewed child so inbound continuations defer their
+  // conveyor re-rank until navigation moves away from it.
+  createEffect(() => {
+    setViewedChild(route.sessionID)
+  })
+  onCleanup(() => setViewedChild(undefined))
   const location = createMemo(() => {
     const current = session()
     return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined
