@@ -103,7 +103,9 @@ test("compaction evicts least-recently-viewed terminal sessions and keeps rows",
     expect(sync.data.message["ses_seed_05"]).toHaveLength(1)
     expect(sync.data.message["ses_extra_1"]).toHaveLength(1)
     expect(sync.data.part["msg_ses_seed_03_0"]).toBeUndefined()
-    expect(sync.data.session.filter((session) => session.id.startsWith("ses_"))).toHaveLength(20)
+    // 20 seeded rows plus ses_extra_1/2, whose unknown-row messages were
+    // reconciled into rows by the session self-heal.
+    expect(sync.data.session.filter((session) => session.id.startsWith("ses_"))).toHaveLength(22)
   } finally {
     app.renderer.destroy()
   }
@@ -217,7 +219,9 @@ test("pending permission toolInput is bounded, not retained in the store", async
         },
       }),
     )
-    await wait(() => (sync.data.permission[ids[0]]?.length ?? 0) === 1 && (sync.data.permission[ids[1]]?.length ?? 0) === 1)
+    await wait(
+      () => (sync.data.permission[ids[0]]?.length ?? 0) === 1 && (sync.data.permission[ids[1]]?.length ?? 0) === 1,
+    )
 
     expect(sync.data.permission[ids[0]]![0]!.toolInput).toBeUndefined()
     expect(sync.data.permission[ids[1]]![0]!.toolInput).toBeUndefined()

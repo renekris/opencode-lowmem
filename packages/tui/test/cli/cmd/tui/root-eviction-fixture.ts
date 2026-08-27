@@ -52,14 +52,61 @@ export function fetchFor(rows: Map<string, ReturnType<typeof row>>, calls: Map<s
   }
 }
 
+export function userMessage(sessionID: string, index: number) {
+  return {
+    id: `msg_${sessionID}_user_${index}`,
+    sessionID,
+    role: "user" as const,
+    agent: "build",
+    model: { providerID: "test", modelID: "model" },
+    mode: "build",
+    path: { cwd: "/tmp/opencode/packages/opencode", root: "/tmp/opencode/packages/opencode" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: index },
+  }
+}
+
 export function emitRow(emit: Emit, value: ReturnType<typeof row>) {
   emit(global({ id: `evt_row_${value.id}`, type: "session.updated", properties: { sessionID: value.id, info: value } }))
 }
 
-export function emitMessage(emit: Emit, value: ReturnType<typeof message>) {
+export function emitCreated(emit: Emit, value: ReturnType<typeof row>) {
+  emit(
+    global({
+      id: `evt_created_${value.id}`,
+      type: "session.created",
+      properties: { sessionID: value.id, info: value },
+    }),
+  )
+}
+
+export function emitDeleted(emit: Emit, value: ReturnType<typeof row>) {
+  emit(
+    global({
+      id: `evt_deleted_${value.id}`,
+      type: "session.deleted",
+      properties: { sessionID: value.id, info: value },
+    }),
+  )
+}
+
+export function emitMessage(emit: Emit, value: ReturnType<typeof message> | ReturnType<typeof userMessage>) {
   emit(
     global({ id: `evt_${value.id}`, type: "message.updated", properties: { sessionID: value.sessionID, info: value } }),
   )
+}
+
+export function emitPart(emit: Emit, sessionID: string) {
+  const part = {
+    id: `prt_${sessionID}_1`,
+    sessionID,
+    messageID: `msg_${sessionID}_9`,
+    type: "text" as const,
+    text: "hello",
+    time: { created: 9, start: 9, end: 9 },
+  }
+  emit(global({ id: `evt_part_${sessionID}`, type: "message.part.updated", properties: { sessionID, part, time: 9 } }))
 }
 
 export async function withSessionLimit(limit: string, run: () => Promise<void>) {

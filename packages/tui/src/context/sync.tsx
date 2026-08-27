@@ -174,7 +174,8 @@ export const {
     const payloadBudget = payloadEviction.budget
     const trackPermissionRequests = (sessionID: string) =>
       payloadBudget.replacePermissionRequests(sessionID, store.permission[sessionID])
-    const trackQuestionRequests = (sessionID: string) => payloadBudget.replaceQuestionRequests(sessionID, store.question[sessionID])
+    const trackQuestionRequests = (sessionID: string) =>
+      payloadBudget.replaceQuestionRequests(sessionID, store.question[sessionID])
     const partDeltaBuffer = createPartDeltaBuffer({
       apply: ({ messageID, partID, field, accumulated }) => {
         try {
@@ -197,7 +198,13 @@ export const {
           if (!updated) return
           const prepared = payloadBudget.preparePart(updated.sessionID, updated)
           if (prepared.part !== updated) setStore("part", messageID, result.index, prepared.part)
-          payloadBudget.replacePart(messageID, prepared.part.id, prepared.part.sessionID, prepared.part, prepared.measuredBytes)
+          payloadBudget.replacePart(
+            messageID,
+            prepared.part.id,
+            prepared.part.sessionID,
+            prepared.part,
+            prepared.measuredBytes,
+          )
           payloadBudget.markDeltaPart(messageID, prepared.part.id)
         } finally {
           payloadEviction.compact()
@@ -232,6 +239,53 @@ export const {
       const info = record.info
       if (isRecord(info) && typeof info.id === "string") return info.id
       return undefined
+    }
+    // Fork(lowmem): the conveyor can only show a child whose session row
+    // exists. session.created and session.updated share one upsert, and a
+    // message for a still-unknown row self-heals through a single-flight
+    // session GET instead of a full payload hydration.
+    const sessionRowFetches = new Set<string>()
+    function upsertSessionInfo(info: Session) {
+      if (info.parentID === undefined) forgetInboundChild(info.id)
+      const result = search(store.session, info.id, (s) => s.id)
+      if (result.found) {
+        setStore("session", result.index, reconcile(info))
+        return
+      }
+      setStore(
+        "session",
+        produce((draft) => {
+          draft.splice(result.index, 0, info)
+        }),
+      )
+    }
+    function forgetRootInboundRanks(sessions: readonly Session[]) {
+      for (const info of sessions) {
+        if (info.parentID === undefined) forgetInboundChild(info.id)
+      }
+    }
+    function reconcileSessionRow(sessionID: string) {
+      if (sessionRowFetches.has(sessionID)) return
+      sessionRowFetches.add(sessionID)
+      void sdk.client.session
+        .get({ sessionID }, { throwOnError: true })
+        .then((res) => {
+          // The session may have been deleted, or a live session event may
+          // have already provided a newer row, while the GET was in flight.
+          if (res.data === undefined) return
+          if (payloadEviction.isDeleted(sessionID)) return
+          if (search(store.session, sessionID, (s) => s.id).found) return
+          upsertSessionInfo(res.data)
+        })
+        .catch((e: unknown) => {
+          console.error("tui session row reconciliation failed", {
+            sessionID,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        })
+        .finally(() => {
+          sessionRowFetches.delete(sessionID)
+        })
     }
     event.subscribe((event, { directory, workspace }) => {
       const tombstoneID = tombstoneSessionID(event.properties)
@@ -378,19 +432,9 @@ export const {
           }
           break
         }
+        case "session.created":
         case "session.updated": {
-          if (event.properties.info.parentID === undefined) forgetInboundChild(event.properties.info.id)
-          const result = search(store.session, event.properties.info.id, (s) => s.id)
-          if (result.found) {
-            setStore("session", result.index, reconcile(event.properties.info))
-            break
-          }
-          setStore(
-            "session",
-            produce((draft) => {
-              draft.splice(result.index, 0, event.properties.info)
-            }),
-          )
+          upsertSessionInfo(event.properties.info)
           break
         }
 
@@ -427,6 +471,9 @@ export const {
           if (!rankedRow.found || store.session[rankedRow.index]?.parentID !== undefined) {
             noteInboundMessage(event.properties.info)
           }
+          if (!rankedRow.found && !payloadEviction.isEvicted(event.properties.info.sessionID)) {
+            reconcileSessionRow(event.properties.info.sessionID)
+          }
           if (payloadEviction.isEvicted(event.properties.info.sessionID)) {
             break
           }
@@ -434,14 +481,22 @@ export const {
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
-            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
+            payloadBudget.replaceMessage(
+              event.properties.info.sessionID,
+              event.properties.info.id,
+              event.properties.info,
+            )
             payloadEviction.compact()
             break
           }
           const result = search(messages, messageKey(event.properties.info), messageKey)
           if (result.found) {
             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
-            payloadBudget.replaceMessage(event.properties.info.sessionID, event.properties.info.id, event.properties.info)
+            payloadBudget.replaceMessage(
+              event.properties.info.sessionID,
+              event.properties.info.id,
+              event.properties.info,
+            )
             payloadEviction.compact()
             break
           }
@@ -653,7 +708,10 @@ export const {
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
-              if (sessions !== undefined) setStore("session", reconcile(sessions))
+              if (sessions !== undefined) {
+                forgetRootInboundRanks(sessions)
+                setStore("session", reconcile(sessions))
+              }
             })
           })
         })
@@ -661,7 +719,14 @@ export const {
           if (store.status !== "complete") setStore("status", "partial")
           // non-blocking
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+            ...(args.continue
+              ? []
+              : [
+                  sessionListPromise.then((sessions) => {
+                    forgetRootInboundRanks(sessions)
+                    setStore("session", reconcile(sessions))
+                  }),
+                ]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
@@ -731,6 +796,7 @@ export const {
         },
         async refresh() {
           const list = await listSessions()
+          forgetRootInboundRanks(list)
           setStore("session", reconcile(list))
         },
         status(sessionID: string) {
@@ -763,6 +829,8 @@ export const {
             // Fork(lowmem): the session may have been deleted while fetching;
             // writing would resurrect its payloads.
             if (payloadEviction.isDeleted(sessionID)) return
+            const fetchedRow = session.data
+            if (fetchedRow !== undefined && fetchedRow.parentID === undefined) forgetInboundChild(sessionID)
             const messageIDs = payloadBudget.messageIDs(sessionID)
             batch(() => {
               for (const flushed of partDeltaBuffer.flushMessages(messageIDs)) tracker.parts.add(flushed.partID)
