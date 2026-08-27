@@ -91,6 +91,16 @@ export function emitDeleted(emit: Emit, value: ReturnType<typeof row>) {
   )
 }
 
+export function emitMoved(emit: Emit, sessionID: string, directory: string) {
+  emit(
+    global({
+      id: `evt_moved_${sessionID}`,
+      type: "session.next.moved",
+      properties: { sessionID, location: { directory }, subdirectory: undefined, timestamp: 999 },
+    }),
+  )
+}
+
 export function emitMessage(emit: Emit, value: ReturnType<typeof message> | ReturnType<typeof userMessage>) {
   emit(
     global({ id: `evt_${value.id}`, type: "message.updated", properties: { sessionID: value.sessionID, info: value } }),

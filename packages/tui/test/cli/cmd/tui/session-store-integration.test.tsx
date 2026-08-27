@@ -6,6 +6,7 @@ import {
   emitCreated,
   emitDeleted,
   emitMessage,
+  emitMoved,
   emitRow,
   fetchFor,
   row,
@@ -143,6 +144,47 @@ test("a live session.updated during session.sync hydration wins over the stale G
   })
 })
 
+test("a stale session GET cannot overwrite a row a newer list application wrote", async () => {
+  await withSessionLimit("50", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const root = row("ses_root")
+    const child = { ...row("ses_child", root.id), title: "list-v1" }
+    const newer = { ...child, title: "list-v2" }
+    const older = { ...child, title: "get-v1" }
+    const rows = new Map([
+      [root.id, root],
+      [child.id, child],
+    ])
+    const pending: ((info: ReturnType<typeof row>) => void)[] = []
+    const handler: FetchHandler = (url) => {
+      const session = url.pathname.match(/^\/session\/([^/]+)$/)
+      if (session && session[1] === child.id) {
+        return new Promise<Response>((resolve) => {
+          pending.push((info) => resolve(json(info)))
+        })
+      }
+      if (url.pathname === "/session") return json([...rows.values()])
+      return fetchFor(rows, new Map())(url)
+    }
+    const { app, sync } = await mount(handler, tmp.path)
+
+    try {
+      await wait(() => sync.data.session.find((session) => session.id === child.id) !== undefined)
+      void sync.session.sync(child.id)
+      await wait(() => pending.length > 0)
+      rows.set(child.id, newer)
+      await sync.session.refresh()
+      expect(sync.data.session.find((session) => session.id === child.id)?.title).toBe("list-v2")
+      for (const resolve of pending) resolve(older)
+      await wait(() => sync.data.message[child.id] !== undefined)
+      expect(sync.data.session.find((session) => session.id === child.id)?.title).toBe("list-v2")
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+})
+
 test("a delegation wave keeps fresh children at the tail and moves the continuation last", async () => {
   await withSessionLimit("50", async () => {
     await using tmp = await tmpdir()
@@ -177,6 +219,121 @@ test("a delegation wave keeps fresh children at the tail and moves the continuat
       expect(ids).toEqual([stale.id, fresh[0].id, fresh[1].id, fresh[2].id, old.id])
     } finally {
       for (const info of [stale, old, ...fresh]) forgetInboundChild(info.id)
+      app.renderer.destroy()
+    }
+  })
+})
+
+test("a stale session list cannot drop a session.next.moved row mutated mid-flight", async () => {
+  await withSessionLimit("50", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const root = row("ses_root")
+    const child = row("ses_child", root.id)
+    const rows = new Map([
+      [root.id, root],
+      [child.id, child],
+    ])
+    let deferList = false
+    const listWaiters: ((body: ReturnType<typeof row>[]) => void)[] = []
+    const handler: FetchHandler = (url) => {
+      if (url.pathname === "/session") {
+        if (!deferList) return json([...rows.values()])
+        return new Promise<Response>((resolve) => {
+          listWaiters.push((body) => resolve(json(body)))
+        })
+      }
+      return fetchFor(rows, new Map())(url)
+    }
+    const { app, emit, sync } = await mount(handler, tmp.path)
+
+    try {
+      emitRow(emit, root)
+      emitRow(emit, child)
+      await wait(() => sync.data.session.find((session) => session.id === child.id) !== undefined)
+      deferList = true
+      const refreshing = sync.session.refresh()
+      await wait(() => listWaiters.length > 0)
+      emitMoved(emit, child.id, "/srv/moved-project")
+      await wait(
+        () => sync.data.session.find((session) => session.id === child.id)?.directory === "/srv/moved-project",
+      )
+      for (const resolve of listWaiters) resolve([root])
+      await refreshing
+      const moved = sync.data.session.find((session) => session.id === child.id)
+      expect(moved?.directory).toBe("/srv/moved-project")
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+})
+
+test("a stale session list cannot revert a moved row it still lists with old contents", async () => {
+  await withSessionLimit("50", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const root = row("ses_root")
+    const child = row("ses_child", root.id)
+    const rows = new Map([
+      [root.id, root],
+      [child.id, child],
+    ])
+    let deferList = false
+    const listWaiters: ((body: ReturnType<typeof row>[]) => void)[] = []
+    const handler: FetchHandler = (url) => {
+      if (url.pathname === "/session") {
+        if (!deferList) return json([...rows.values()])
+        return new Promise<Response>((resolve) => {
+          listWaiters.push((body) => resolve(json(body)))
+        })
+      }
+      return fetchFor(rows, new Map())(url)
+    }
+    const { app, emit, sync } = await mount(handler, tmp.path)
+
+    try {
+      await wait(() => sync.data.session.find((session) => session.id === child.id) !== undefined)
+      deferList = true
+      const refreshing = sync.session.refresh()
+      await wait(() => listWaiters.length > 0)
+      emitMoved(emit, child.id, "/srv/moved-project")
+      await wait(
+        () => sync.data.session.find((session) => session.id === child.id)?.directory === "/srv/moved-project",
+      )
+      for (const resolve of listWaiters) resolve([root, child])
+      await refreshing
+      const moved = sync.data.session.find((session) => session.id === child.id)
+      expect(moved?.directory).toBe("/srv/moved-project")
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+})
+
+test("session.sync overwrites a list-sourced row no live event touched", async () => {
+  await withSessionLimit("50", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const root = row("ses_root")
+    const staleRow = { ...row("ses_listed", root.id), title: "from-list" }
+    const freshRow = { ...staleRow, title: "from-get" }
+    const rows = new Map([
+      [root.id, root],
+      [staleRow.id, staleRow],
+    ])
+    const handler: FetchHandler = (url) => {
+      const session = url.pathname.match(/^\/session\/([^/]+)$/)
+      if (session && session[1] === staleRow.id) return json(freshRow)
+      return listFetch(rows)(url)
+    }
+    const { app, sync } = await mount(handler, tmp.path)
+
+    try {
+      await wait(() => sync.data.session.find((session) => session.id === staleRow.id) !== undefined)
+      expect(sync.data.session.find((session) => session.id === staleRow.id)?.title).toBe("from-list")
+      await sync.session.sync(staleRow.id)
+      expect(sync.data.session.find((session) => session.id === staleRow.id)?.title).toBe("from-get")
+    } finally {
       app.renderer.destroy()
     }
   })

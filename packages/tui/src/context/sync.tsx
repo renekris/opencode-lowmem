@@ -273,20 +273,22 @@ export const {
     }
     // A list response is a point-in-time snapshot. Rows a live event
     // upserted after the request began are strictly fresher than the
-    // snapshot, and rows deleted since are tombstoned — reconcile must
-    // not drop or resurrect them.
+    // snapshot — whether or not the snapshot still lists the row — so the
+    // stored row survives and its contents win over the snapshot's stale
+    // copy. Rows deleted since are tombstoned and must not resurrect.
     function applySessionList(sessions: readonly Session[], requestGeneration: number) {
       const listed = sessions.filter((info) => !payloadEviction.isDeleted(info.id))
-      const listedIDs = new Set(listed.map((info) => info.id))
-      const liveRows = store.session.filter(
-        (info) => !listedIDs.has(info.id) && (sessionRowGenerations.get(info.id) ?? 0) > requestGeneration,
-      )
-      const droppedRows = store.session.filter(
-        (info) => !listedIDs.has(info.id) && (sessionRowGenerations.get(info.id) ?? 0) <= requestGeneration,
-      )
-      forgetRootInboundRanks(listed)
-      setStore("session", reconcile(listed))
-      for (const info of liveRows) upsertSessionInfo(info)
+      const preservedRows = store.session.filter((info) => (sessionRowGenerations.get(info.id) ?? 0) > requestGeneration)
+      const preservedIDs = new Set(preservedRows.map((info) => info.id))
+      const listedFresh = listed.filter((info) => !preservedIDs.has(info.id))
+      const listedFreshIDs = new Set(listedFresh.map((info) => info.id))
+      const droppedRows = store.session.filter((info) => !listedFreshIDs.has(info.id) && !preservedIDs.has(info.id))
+      // A freshly listed row is live knowledge: a session.sync GET with an
+      // undefined baseline (started before this application) must lose to it.
+      for (const info of listedFresh) touchSessionRow(info.id)
+      forgetRootInboundRanks(listedFresh)
+      setStore("session", reconcile(listedFresh))
+      for (const info of preservedRows) upsertSessionInfo(info)
       for (const info of droppedRows) sessionRowGenerations.delete(info.id)
     }
     function reconcileSessionRow(sessionID: string) {
@@ -473,6 +475,9 @@ export const {
         case "session.next.moved": {
           const result = search(store.session, event.properties.sessionID, (s) => s.id)
           if (!result.found) break
+          // The move is a live row mutation: mark it fresher than any
+          // in-flight list snapshot so the snapshot cannot revert it.
+          touchSessionRow(event.properties.sessionID)
           setStore(
             "session",
             result.index,
@@ -848,7 +853,7 @@ export const {
           if (syncing) return syncing
           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
           hydratingSessions.set(sessionID, tracker)
-          const rowGenerationBeforeFetch = sessionRowGenerations.get(sessionID) ?? 0
+          const rowGenerationBeforeFetch = sessionRowGenerations.get(sessionID)
           const task = (async () => {
             const [session, messages, todo, diff] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
