@@ -513,27 +513,6 @@ async function unterminatedSSEServer(terminated = false): Promise<{ server: Serv
   return { server, url: `http://127.0.0.1:${address.port}` }
 }
 
-function withAuthContent<A, E, R>(self: Effect.Effect<A, E, R>, value: Record<string, unknown> = defaultAuthContent()) {
-  return Effect.acquireUseRelease(
-    Effect.sync(() => {
-      const previous = process.env.OPENCODE_AUTH_CONTENT
-      process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(value)
-      return previous
-    }),
-    () => self,
-    (previous) =>
-      Effect.sync(() => {
-        if (previous === undefined) delete process.env.OPENCODE_AUTH_CONTENT
-        else process.env.OPENCODE_AUTH_CONTENT = previous
-      }),
-  )
-}
-
-function defaultAuthContent() {
-  return {
-    openai: { type: "oauth", refresh: "refresh", access: "access", expires: Date.now() + 60_000 },
-  }
-}
 
 async function commentStormServer(): Promise<{ server: Server; url: string }> {
   const server = createServer((_, res) => {
