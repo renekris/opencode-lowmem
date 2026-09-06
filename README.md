@@ -346,9 +346,9 @@ Correction 2026-08-25: `highlightOnce` IS present in our pinned
 was wrong. #40698 stays deferred for scope/priority (own behavior-preserving
 round), not for a missing seam; #43769 stays blocked until the base carries
 the post-split tree. Porting #43769 now would mean inventing seams upstream
-will replace. Already-merged perf PRs riding the next tag: #42826, #43292,
-#42346, #42579, #42741, #42952, #43191, #43158, #42467, #42458, #42468,
-#42972.
+will replace. The perf PRs that were riding this tag (#42826, #43292, #42346,
+#42579, #42741, #42952, #43191, #43158, #42467, #42458, #42468, #42972)
+arrived with the v1.18.29 merge.
 
 **Backlog** (unclaimed, no upstream equivalent): run-UI delta coalescing
 (`packages/opencode/src/cli/cmd/run/session-data.ts`
