@@ -450,6 +450,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   )
 
   // Update terminal window title based on current route and session
+  // Fork(lowmem): optionally append the session id to the terminal title so it
+  // stays visible in tmux pane titles and terminal tabs without opening /debug.
+  // Default on in this fork; set OPENCODE_TUI_SESSION_ID_IN_TITLE=0 to hide.
+  const sessionIDInTitle = process.env.OPENCODE_TUI_SESSION_ID_IN_TITLE !== "0"
+  const withSessionID = (title: string, sessionID: string | undefined) =>
+    sessionIDInTitle && sessionID ? `${title} [${sessionID}]` : title
   createEffect(() => {
     if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE) return
 
@@ -461,12 +467,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (route.data.type === "session") {
       const session = sync.session.get(route.data.sessionID)
       if (!session || isDefaultTitle(session.title)) {
-        renderer.setTerminalTitle("OpenCode")
+        renderer.setTerminalTitle(withSessionID("OpenCode", route.data.sessionID))
         return
       }
 
       const title = session.title.length > 40 ? session.title.slice(0, 37) + "…" : session.title
-      renderer.setTerminalTitle(`OC | ${title}`)
+      renderer.setTerminalTitle(withSessionID(`OC | ${title}`, route.data.sessionID))
       return
     }
 
