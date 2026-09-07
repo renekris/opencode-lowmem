@@ -104,6 +104,39 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 | LSP document LRU              | Open LSP documents (full text kept for incremental sync) are evicted least-recently-used with an explicit `didClose` — bounded by both count and bytes, refresh reads one file at a time, and diagnostics for closed docs are discarded via generation tokens                                                                                                                                                                                                             | `packages/opencode/src/lsp/document-store.ts`; see the bound-knob inventory below.                                                                                                                                                                                     |
 | Session id in terminal title  | The terminal/tmux-pane title carries the active session id (`OC | <title> [ses_…]`), so the id you pass to `opencode -s` or Hermes tooling is always visible without opening `/debug`                                                                                                                                                                                                                     | `packages/tui/src/app.tsx` title effect; `OPENCODE_TUI_SESSION_ID_IN_TITLE=0` restores the stock title (default on in this fork); guarded by `test/session-title.test.tsx`                                                                                              |
 
+### Unreleased long-session candidate
+
+This worktree contains additional fixes reviewed for a **controlled manual trial**,
+not a claim that every source of long-session RSS growth has been eliminated.
+The candidate SQL-selects only one user turn for summary/diff reads, and copies
+fork source messages in 50-message pages with a fixed entry-time upper boundary.
+Parent and compaction-tail ID mappings remain available across pages. Instance
+SSE listeners now exclude unrelated project/workspace events before queueing;
+matching-event queues are not newly capped because overflow recovery is not
+proven for every consumer.
+
+Optional `OPENCODE_MEMORY_STATS_PATH=/absolute/directory` enables numeric memory
+diagnostics in the TUI and its server worker. Each role atomically overwrites
+its own `tui.memory.json` or `server.memory.json`, retaining at most 60 samples
+at one-minute intervals. Sampling starts immediately, never overlaps writes,
+and stops with an actionable error if a scheduled write fails. Use a distinct
+directory per running OpenCode process. RSS is process-wide: do not add the
+TUI and worker RSS values together. This is diagnostics, not a process RAM cap.
+
+The OpenCode and SDK typechecks, full embedded-web build, and synthetic binary
+import/reopen/fork/diff proofs pass. The current full binary is stamped
+`1.18.29-lowmem.2`; the earlier CLI-only QA build has been replaced. The session
+suite reports 441 passing tests with seven existing skips and one existing todo.
+Real PTY startup confirms both numeric samplers start and Ctrl-D exits cleanly.
+Validation used a serialized 6 GiB hard cap with no swap after host RAM was freed.
+The code and final lifecycle delta passed review. Installation is manual; no
+installed binary or active configuration is changed by building this worktree.
+
+No database migration or retention policy is included. Old durable events are
+used by history and workspace replay, so deleting them while preserving only
+visible messages is not a safe general retention policy. Whole-session cold
+archival requires a separately agreed restore/selection contract and proofs.
+
 ### Resource-bound knob inventory
 
 All knobs below use the source parser for their unit: byte limits require a `KB` or `MB` suffix and count limits are plain integers. The exact string `"0"` disables that individual bound. Durable event page limits are fixed constants, not environment knobs.
@@ -136,8 +169,9 @@ Part-cap scope (honest bounds): `OPENCODE_TUI_ACTIVE_PART_MAX_MB` truncates
 selected scalar leaves only — part text/reasoning/completed-tool output, and
 permission inputs. It is not a whole-part envelope: `ToolPart.state.input`,
 `state.metadata`, error strings, `SnapshotPart.snapshot`, `SubtaskPart.prompt`,
-and `AssistantMessage.structured` pass through untruncated, and the active
-session's message count, todos, and session diffs remain unbounded. A
+and `AssistantMessage.structured` pass through untruncated. The legacy TUI's
+initial and incremental message window is 100, but active-session todos and
+session diffs remain unbounded. A
 pathological active session therefore has no finite worst-case RSS under this
 design; the bound removes the streaming-text and tool-output accumulators that
 dominated real-world growth.
