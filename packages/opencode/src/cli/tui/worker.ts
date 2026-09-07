@@ -7,11 +7,13 @@ import { GlobalBus } from "@/bus/global"
 import { ServerAuth } from "@/server/auth"
 import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
+import { MemoryStat } from "@/cli/memory-stat"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 
 Heap.start()
+const memory = await MemoryStat.start({ role: "server" })
 
 const onUnhandledRejection = (_error: unknown) => {}
 
@@ -70,6 +72,7 @@ export const rpc = {
     )
   },
   async shutdown() {
+    await memory?.stop()
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)
     process.off("unhandledRejection", onUnhandledRejection)

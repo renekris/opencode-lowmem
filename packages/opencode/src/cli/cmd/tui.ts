@@ -14,6 +14,7 @@ import { writeHeapSnapshot } from "v8"
 import { ServerAuth } from "@/server/auth"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+import { MemoryStat } from "@/cli/memory-stat"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -206,6 +207,7 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+      const memory = await MemoryStat.start({ role: "tui" })
 
       const worker = new Worker(file, {
         env: Object.fromEntries(
@@ -223,6 +225,7 @@ export const TuiThreadCommand = cmd({
         if (stopped) return
         stopped = true
         process.off("SIGUSR2", reload)
+        await memory?.stop()
         await withTimeout(client.call("shutdown", undefined), 5000).catch(() => {})
         worker.terminate()
       }
