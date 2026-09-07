@@ -25,7 +25,8 @@ the plugin list with the absolute file URL of the companion worktree's
 runtime dependencies/assets available. No installed configuration has been
 edited for you.
 
-From this worktree, launch the new binary with `-s <session-id>`. Optionally set
+From the session's original project directory, invoke this worktree's new binary
+by absolute path with `-s <session-id>`. Optionally set
 `OPENCODE_MEMORY_STATS_PATH` to a distinct writable directory for this process
 to collect the small role-separated numeric histories. These measurements will
 be needed to determine whether any persistent runtime growth remains. The
