@@ -703,41 +703,43 @@ const layer: Layer.Layer<
         title,
         metadata: structuredClone(original.metadata),
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
-      const target = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
+      yield* MessageV2.forEachBefore({
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        each: (msg) =>
+          Effect.gen(function* () {
+            const newID = MessageID.ascending()
+            idMap.set(msg.info.id, newID)
 
-      for (const msg of msgs.slice(0, target < 0 ? msgs.length : target)) {
-        const newID = MessageID.ascending()
-        idMap.set(msg.info.id, newID)
+            const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
+            const clone: SessionV1.Info = {
+              ...msg.info,
+              sessionID: session.id,
+              id: newID,
+              ...(parentID && { parentID }),
+            }
+            // Fork(lowmem): messages summarized before write-time trimming still
+            // carry full patches; strip them before re-publishing as new events.
+            if (typeof clone.summary === "object" && clone.summary.diffs) {
+              clone.summary = { ...clone.summary, diffs: trimSummaryDiffs(clone.summary.diffs) }
+            }
+            const cloned = yield* updateMessage(clone)
 
-        const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
-        const clone: SessionV1.Info = {
-          ...msg.info,
-          sessionID: session.id,
-          id: newID,
-          ...(parentID && { parentID }),
-        }
-        // Fork(lowmem): messages summarized before write-time trimming still
-        // carry full patches; strip them before re-publishing as new events.
-        if (typeof clone.summary === "object" && clone.summary.diffs) {
-          clone.summary = { ...clone.summary, diffs: trimSummaryDiffs(clone.summary.diffs) }
-        }
-        const cloned = yield* updateMessage(clone)
-
-        for (const part of msg.parts) {
-          const p: SessionV1.Part = {
-            ...part,
-            id: PartID.ascending(),
-            messageID: cloned.id,
-            sessionID: session.id,
-          }
-          if (p.type === "compaction" && p.tail_start_id) {
-            p.tail_start_id = idMap.get(p.tail_start_id)
-          }
-          yield* updatePart(p)
-        }
-      }
+            for (const part of msg.parts) {
+              const p: SessionV1.Part = {
+                ...part,
+                id: PartID.ascending(),
+                messageID: cloned.id,
+                sessionID: session.id,
+              }
+              if (p.type === "compaction" && p.tail_start_id) {
+                p.tail_start_id = idMap.get(p.tail_start_id)
+              }
+              yield* updatePart(p)
+            }
+          }),
+      }).pipe(Effect.provideService(Database.Service, database))
       return session
     })
 

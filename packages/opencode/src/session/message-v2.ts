@@ -28,6 +28,7 @@ import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageSelection } from "./message-selection"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
@@ -482,6 +483,29 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
     more: result.more,
     cursor: result.cursor,
   }
+})
+
+export const turn = Effect.fn("MessageV2.turn")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
+  const { db } = yield* Database.Service
+  return yield* hydrate(db, yield* MessageSelection.turnRows(input))
+})
+
+export const forEachBefore = Effect.fn("MessageV2.forEachBefore")(function* (input: {
+  sessionID: SessionID
+  messageID?: MessageID
+  each: (message: WithParts) => Effect.Effect<void>
+}) {
+  const { db } = yield* Database.Service
+  yield* MessageSelection.forEachBeforeRows({
+    sessionID: input.sessionID,
+    messageID: input.messageID,
+    each: (rows) =>
+      Effect.gen(function* () {
+        for (const message of yield* hydrate(db, rows)) {
+          yield* input.each(message)
+        }
+      }),
+  })
 })
 
 export function stream(sessionID: SessionID) {

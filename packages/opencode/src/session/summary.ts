@@ -4,9 +4,11 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
+import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID } from "./schema"
 import { trimSummaryDiffs } from "./summary-diff-trim"
 import { Config } from "@/config/config"
+import { Database } from "@opencode-ai/core/database/database"
 
 function unquoteGitPath(input: string) {
   if (!input.startsWith('"')) return input
@@ -79,6 +81,7 @@ const layer = Layer.effect(
     const snapshot = yield* Snapshot.Service
     const events = yield* EventV2Bridge.Service
     const config = yield* Config.Service
+    const database = yield* Database.Service
 
     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
       let from: string | undefined
@@ -114,11 +117,9 @@ const layer = Layer.effect(
       })
       yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: [] })
       if ((yield* config.get()).snapshot === false) return
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      if (!all.length) return
-
-      const messages = all.filter(
-        (m) => m.info.id === input.messageID || (m.info.role === "assistant" && m.info.parentID === input.messageID),
+      const messages = yield* MessageV2.turn({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
       )
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
@@ -129,14 +130,12 @@ const layer = Layer.effect(
 
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
       if (!input.messageID) return []
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      const message = all.find((item) => item.info.id === input.messageID)
-      if (!message || message.info.role !== "user") return []
-      const messages = all.filter(
-        (item) =>
-          item.info.id === input.messageID ||
-          (item.info.role === "assistant" && item.info.parentID === input.messageID),
+      const messages = yield* MessageV2.turn({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
       )
+      const message = messages.find((item) => item.info.id === input.messageID)
+      if (!message || message.info.role !== "user") return []
       const computed = yield* computeDiff({ messages })
       const diffs = computed.length > 0 ? computed : (message.info.summary?.diffs ?? [])
       return diffs.map((item) => {
@@ -160,7 +159,7 @@ export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Session.node, Snapshot.node, EventV2Bridge.node, Config.node],
+  deps: [Session.node, Snapshot.node, EventV2Bridge.node, Config.node, Database.node],
 })
 
 export * as SessionSummary from "./summary"
