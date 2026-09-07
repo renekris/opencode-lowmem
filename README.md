@@ -104,38 +104,48 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 | LSP document LRU              | Open LSP documents (full text kept for incremental sync) are evicted least-recently-used with an explicit `didClose` — bounded by both count and bytes, refresh reads one file at a time, and diagnostics for closed docs are discarded via generation tokens                                                                                                                                                                                                             | `packages/opencode/src/lsp/document-store.ts`; see the bound-knob inventory below.                                                                                                                                                                                     |
 | Session id in terminal title  | The terminal/tmux-pane title carries the active session id (`OC | <title> [ses_…]`), so the id you pass to `opencode -s` or Hermes tooling is always visible without opening `/debug`                                                                                                                                                                                                                     | `packages/tui/src/app.tsx` title effect; `OPENCODE_TUI_SESSION_ID_IN_TITLE=0` restores the stock title (default on in this fork); guarded by `test/session-title.test.tsx`                                                                                              |
 
-### Unreleased long-session candidate
+### Release 1.18.29-lowmem.3
 
-This worktree contains additional fixes reviewed for a **controlled manual trial**,
-not a claim that every source of long-session RSS growth has been eliminated.
-The candidate SQL-selects only one user turn for summary/diff reads, and copies
-fork source messages in 50-message pages with a fixed entry-time upper boundary.
-Parent and compaction-tail ID mappings remain available across pages. Instance
-SSE listeners now exclude unrelated project/workspace events before queueing;
-matching-event queues are not newly capped because overflow recovery is not
-proven for every consumer.
+This release targets long-session
+growth without claiming that every source of RSS growth has been eliminated:
 
-Optional `OPENCODE_MEMORY_STATS_PATH=/absolute/directory` enables numeric memory
-diagnostics in the TUI and its server worker. Each role atomically overwrites
-its own `tui.memory.json` or `server.memory.json`, retaining at most 60 samples
-at one-minute intervals. Sampling starts immediately, never overlaps writes,
-and stops with an actionable error if a scheduled write fails. Use a distinct
-directory per running OpenCode process. RSS is process-wide: do not add the
-TUI and worker RSS values together. This is diagnostics, not a process RAM cap.
+- Summary and diff reads select only the relevant user turn instead of loading
+  unrelated history.
+- Fork history is copied in 50-message pages with a fixed entry-time horizon.
+  Parent and compaction-tail ID mappings remain available across pages.
+- Instance SSE listeners filter unrelated project and workspace events before
+  they enter the queue. Matching-event queues are not newly capped because
+  overflow recovery is not proven for every consumer.
+- Optional numeric sampling is enabled with
+  `OPENCODE_MEMORY_STATS_PATH=/absolute/directory`. It records at most 60
+  one-minute samples per role and is diagnostics only.
+
+Sampling starts immediately, never overlaps writes, and stops with an actionable
+error if a scheduled write fails. Use a distinct directory per running OpenCode
+process. RSS is process-wide: do not add the TUI and worker RSS values together.
+This is diagnostics, not a process RAM cap.
+
+This is the `.3` publication version. `.2` was skipped as a public release to
+avoid version ambiguity. The detailed validation below is historical evidence
+from the locally verified `1.18.29-lowmem.2` binary; no `.3` binary is claimed
+until the isolated release build completes. The latest upstream check on 2026-09-07
+found `v1.18.29` already merged, and `.3` is based on that release.
+
+#### Historical validation for the locally verified `.2` build
 
 The OpenCode and SDK typechecks, full embedded-web build, and synthetic binary
-import/reopen/fork/diff proofs pass. The current full binary is stamped
-`1.18.29-lowmem.2`; the earlier CLI-only QA build has been replaced. The session
-suite reports 441 passing tests with seven existing skips and one existing todo.
-Real PTY startup confirms both numeric samplers start and Ctrl-D exits cleanly.
-Validation used a serialized 6 GiB hard cap with no swap after host RAM was freed.
-The code and final lifecycle delta passed review. Installation is manual; no
-installed binary or active configuration is changed by building this worktree.
+import/reopen/fork/diff proofs passed. The session suite reported 441 passing
+tests with seven existing skips and one existing todo. Real PTY startup confirmed
+both numeric samplers started and Ctrl-D exited cleanly. Validation used a
+serialized 6 GiB hard cap with no swap after host RAM was freed. The code and
+final lifecycle delta passed review. Building this worktree did not change an
+installed binary or active configuration.
 
-No database migration or retention policy is included. Old durable events are
-used by history and workspace replay, so deleting them while preserving only
-visible messages is not a safe general retention policy. Whole-session cold
-archival requires a separately agreed restore/selection contract and proofs.
+There is no universal RSS cap, no database retention policy or migration, and no
+OMO modification bundled in this release. Old durable events serve history and
+workspace replay, so deleting them while preserving only visible messages is
+not a safe general retention policy. Whole-session cold archival requires a
+separately agreed restore and selection contract with its own proofs.
 
 ### Resource-bound knob inventory
 

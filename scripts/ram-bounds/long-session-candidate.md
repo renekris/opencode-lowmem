@@ -1,7 +1,40 @@
 # Long-session candidate evidence
 
-Status: full build, scoped validation, and RAM-increment review pass. No production
-installation, session restart, live database access, or schema migration.
+Status: release `1.18.29-lowmem.3` documentation and evidence prepared. The `.2`
+publication was intentionally skipped to remove version ambiguity. Full build,
+scoped validation, and RAM-increment review passed for the locally verified
+`1.18.29-lowmem.2` binary. No `.3` binary is claimed until the isolated release build
+completes. The `.2` binary was promoted to the local default on 2026-09-07 at the user's request after
+their sustained trial. No session restart, live database access, or schema
+migration.
+
+The latest upstream check on 2026-09-07 found `v1.18.29` already merged. The
+`.3` publication version is based on that upstream release. This document records
+private local validation and promotion facts, not public installation paths or
+instructions.
+
+Release scope does not include a universal RSS cap, database retention or
+migrations, or OMO modifications. Numeric sampling remains optional diagnostics,
+not a process memory limit.
+
+## Default promotion
+
+The user reports approximately 2.5-3.5 GB during sustained use, with transient
+spikes including 3 to 5 GB during task activity. This is user observation, not a
+profile proving the spike's cause or a hard memory ceiling.
+
+The verified binary was copied to a new sibling and atomically renamed onto
+`/home/renekris/.opencode/bin/opencode`. Both `opencode --version` and
+`oc --version` report `1.18.29-lowmem.2`; the installed SHA-256 matches below.
+Existing processes retain their original executable inode and were not restarted.
+The prior binary is preserved at
+`/home/renekris/.opencode/bin/opencode.pre-lowmem2-20260907` (SHA-256
+`829a3a955107bd792172a85292698c8028165d6fc9d3c3129ec1592a1ce6f360`).
+Rollback, only on request, uses a fresh sibling copy and atomic rename, not an
+in-place overwrite. Global auto-update remains disabled. The existing OMO
+`oh-my-openagent@5.0.0-beta.46` plugin entry was left unchanged; the companion
+local plugin is not globally enabled by this binary promotion. Numeric sampling
+remains opt-in. The manual-trial instructions below describe the earlier trial.
 
 Both the main review and final lifecycle-delta review approved this increment
 for a controlled manual trial, not a claim that persistent RSS or DB growth is
@@ -13,6 +46,10 @@ Local functional commits: `5d40d60d56` (history selection/fork), `09c989d8cb`
 commit: `811d62a40` on beta.46. No branches, tags, or packages were published.
 
 ## Manual trial boundary
+
+The following is historical local-trial context for the `.2` binary and its
+separate local OMO companion. It is not a public installation procedure for
+`.3`.
 
 Use the candidate binary only when the old process is idle and its delegated
 work is settled. Close that old process yourself before reopening the same
