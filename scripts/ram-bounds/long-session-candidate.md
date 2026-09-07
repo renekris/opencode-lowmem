@@ -3,8 +3,8 @@
 Status: release `1.18.29-lowmem.3` documentation and evidence prepared. The `.2`
 publication was intentionally skipped to remove version ambiguity. Full build,
 scoped validation, and RAM-increment review passed for the locally verified
-`1.18.29-lowmem.2` binary. No `.3` binary is claimed until the isolated release build
-completes. The `.2` binary was promoted to the local default on 2026-09-07 at the user's request after
+`1.18.29-lowmem.2` binary. The `.3` matrix build and native surface checks have now
+passed as recorded below. The `.2` binary was promoted to the local default on 2026-09-07 at the user's request after
 their sustained trial. No session restart, live database access, or schema
 migration.
 
@@ -17,7 +17,37 @@ Release scope does not include a universal RSS cap, database retention or
 migrations, or OMO modifications. Numeric sampling remains optional diagnostics,
 not a process memory limit.
 
-## Default promotion
+## Public `.3` build verification
+
+Built all 12 targets at source commit `6df8a6ca7b` in a separate detached worktree
+and synthetic HOME/XDG roots, using Bun 1.3.14 and frozen all-platform dependencies.
+Command from `packages/opencode`: `OPENCODE_VERSION=1.18.29-lowmem.3
+OPENCODE_CHANNEL=latest NODE_OPTIONS=--max-old-space-size=4096
+bun run script/build.ts --skip-install`, with `OPENCODE_RELEASE` unset.
+The build used the serialized 6 GiB hard / 5 GiB high / zero-swap / two-CPU guard.
+The full embedded web UI and all targets built; native Linux x64 and baseline
+version smokes report `1.18.29-lowmem.3`. Other platforms are cross-compiled only.
+
+Native Linux x64 SHA-256:
+`8353630cb5da8be0f1a5916ee347b158266815a744120f6d7d6542cfb228edcb`.
+Real `.3` API checks passed: embedded HTML/JS, 205-message import/reopen, exclusive
+paged fork/diff with an excluded malformed part, and `.1` -> `.3` -> `.1`
+synthetic-database compatibility. Plugin-free PTY startup produced both numeric
+sample files and exited cleanly on Ctrl-D. All proof-owned processes and roots
+were removed. Focused regressions were rerun: 73 pass, 0 fail, 178 assertions;
+OpenCode and both SDK typecheck configurations also passed before publication.
+
+Packaging preserves `<platform>/bin/opencode` for Linux/macOS installer consumers,
+and `<platform>/bin/opencode.exe` for Windows. Nine tarballs and three zip files
+are accompanied by SHA256SUMS. No automatic build/upload workflow runs on the
+fork; publication is manual. No installed binary or live session was changed.
+
+The first frozen dependency install failed because system node-gyp selected
+Homebrew Python without the gyp distribution. Repeating it with
+`PYTHON=/usr/bin/python3` passed; no source, lockfile, or lifecycle-script bypass
+was used. Existing Vite chunk/dynamic-import/source-map warnings remain.
+
+## Historical local `.2` default promotion
 
 The user reports approximately 2.5-3.5 GB during sustained use, with transient
 spikes including 3 to 5 GB during task activity. This is user observation, not a

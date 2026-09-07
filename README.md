@@ -127,8 +127,12 @@ This is diagnostics, not a process RAM cap.
 
 This is the `.3` publication version. `.2` was skipped as a public release to
 avoid version ambiguity. The detailed validation below is historical evidence
-from the locally verified `1.18.29-lowmem.2` binary; no `.3` binary is claimed
-until the isolated release build completes. The latest upstream check on 2026-09-07
+from the locally verified `1.18.29-lowmem.2` binary. The `.3` release was then
+built for all 12 platform targets in an isolated checkout under the same 6 GiB
+hard cap. Linux x64 and baseline version smokes pass; the Linux x64 binary also
+passed isolated API/history compatibility and TUI numeric-sampling/exit checks.
+Other platforms were cross-compiled, not executed on their native systems.
+The latest upstream check on 2026-09-07
 found `v1.18.29` already merged, and `.3` is based on that release.
 
 #### Historical validation for the locally verified `.2` build
