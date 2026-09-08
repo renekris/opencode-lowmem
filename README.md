@@ -103,6 +103,33 @@ Each port commit carries a `(port of upstream #NNNNN)` trailer — never dropped
 | Offline database vacuum guard | `opencode db vacuum` requires an exclusive lock and, on Linux, refuses when `/proc` finds another process holding the database or sidecars; the lock stays held across the guard commit and `VACUUM`                                                                                                                                                                                                                                                                      | Fork-custom safety procedure around the partial #43456 command; `opencode db stats` uses a detached snapshot that excludes live WAL contents and reports `wal_bytes` separately.                                                                                       |
 | LSP document LRU              | Open LSP documents (full text kept for incremental sync) are evicted least-recently-used with an explicit `didClose` — bounded by both count and bytes, refresh reads one file at a time, and diagnostics for closed docs are discarded via generation tokens                                                                                                                                                                                                             | `packages/opencode/src/lsp/document-store.ts`; see the bound-knob inventory below.                                                                                                                                                                                     |
 | Session id in terminal title  | The terminal/tmux-pane title carries the active session id (`OC | <title> [ses_…]`), so the id you pass to `opencode -s` or Hermes tooling is always visible without opening `/debug`                                                                                                                                                                                                                     | `packages/tui/src/app.tsx` title effect; `OPENCODE_TUI_SESSION_ID_IN_TITLE=0` restores the stock title (default on in this fork); guarded by `test/session-title.test.tsx`                                                                                              |
+| TUI event-listener lifecycle  | Components that subscribe to server events (`useEvent`) drop their subscriptions when they unmount; previously every keyed session remount left the old session-route and prompt handlers in the process-global emitter set forever, so heavy session navigation grew per-event dispatch work for the life of the process                                                                                                                                                     | released in `1.18.29-lowmem.4`: subscribe-time owner cleanup in `packages/tui/src/context/event.ts` (`getOwner` + `onCleanup`), preserving effect-rerun disposal; explicit unsubscribe and ownerless subscriptions keep the stock lifetime; guarded by `test/context/event.test.tsx`                                    |
+
+### Release 1.18.29-lowmem.4
+
+Fixes unbounded TUI event-listener growth: components subscribing to server
+events through `useEvent` now dispose their subscriptions with the owning scope
+on unmount. Previously every keyed session remount left the previous
+session-route and prompt handlers in the process-global emitter set forever, so
+heavy session navigation grew per-event dispatch work for the life of the
+process. Explicit unsubscribes and ownerless subscriptions keep the stock
+lifetime.
+
+Scope: this bounds listener accumulation, not overall process RSS. There is no
+database migration, retention policy, or bundled OMO plugin change.
+
+The fix passed the focused TUI regression suite (6 pass, 0 fail, 16 assertions,
+covering keyed remounts, manual unsubscribe, computation reruns, and ownerless
+lifetimes) and the TUI package typecheck. The release was built for all 12
+platform targets with the embedded web UI in an isolated detached checkout at
+the fix commit under the serialized 6 GiB hard cap. Linux x64 and baseline
+version smokes report `1.18.29-lowmem.4`. Other platforms were cross-compiled,
+not executed on their native systems. The Linux x64 binary also passed isolated
+API/history compatibility checks against the locally installed `.4` build, and
+a real PTY run started both numeric recorders and exited cleanly on Ctrl-D.
+Existing Vite chunk/dynamic-import/source-map warnings remain. The tag marks
+the documentation commit; only README and evidence files changed after the
+matrix build, so the tagged tree compiles to the same binaries.
 
 ### Release 1.18.29-lowmem.3
 
@@ -349,6 +376,8 @@ is fork-owned files):
   `test/no-revival.test.ts`, `test/cli/cmd/tui/sync-payload-eviction.test.tsx`)
 - `packages/tui/src/routes/session/index.tsx`, `subagent-footer.tsx` —
   conveyor call-site injections only
+- `packages/tui/src/context/event.ts` — subscribe-time owner cleanup for event
+  subscriptions, released in `1.18.29-lowmem.4` (guarded by `test/context/event.test.tsx`)
 
 **RAM-bounds seams** (rounds 1–2, same rules — re-check each on rebase):
 
